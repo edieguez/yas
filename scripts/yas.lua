@@ -19,7 +19,7 @@ segments = nil
 categories = nil
 
 -- Debug variables start
-youtube_id = "kG22Z4vJhXY"
+youtube_id = "wMGNBQ1HvGc"
 -- Debug variables end
 
 function file_loaded()
@@ -46,7 +46,7 @@ function file_loaded()
     youtube_id = string.sub(youtube_id, 1, 11)
 end
 
-function get_ranges()
+function get_segments()
     local cstr = ("categories=[%s]"):format(options.categories)
     local vstr = ("videoID=%s"):format(youtube_id)
 
@@ -70,7 +70,41 @@ function get_ranges()
     }
 
     segments = utils.parse_json(response.stdout)
-    mp.msg.debug("get_ranges() segments: ", utils.to_string(segments))
+    mp.msg.debug("get_segments() segments: ", utils.to_string(segments))
+
+    create_chapters()
+end
+
+function create_chapters()
+    if not segments then return end
+
+    local chapters = mp.get_property_native("chapter-list")
+    local duration = mp.get_property_native("duration")
+
+    for i, segment in ipairs(segments) do
+        -- Start segment
+        table.insert(chapters, {
+            title=segment.category:gsub("^%l", string.upper):gsub("_", " ") .. " (" .. string.sub(segment.UUID, 1, 6) .. ")",
+            time=(duration == nil or duration > segment.segment[1]) and segment.segment[1] or duration - .001
+        })
+
+        -- End segment
+        table.insert(chapters, {
+            title="",
+            time=(duration == nil or duration > segment.segment[2]) and segment.segment[2] or duration - .001
+        })
+    end
+
+    table.sort(chapters, time_sort)
+    mp.msg.debug("chapter-list" .. utils.to_string(chapters))
+    mp.set_property_native("chapter-list", chapters)
+end
+
+function time_sort(a, b)
+    if a.time == b.time then
+        return string.match(a.title, "segment end")
+    end
+    return a.time < b.time
 end
 
 function parse_categories()
@@ -86,4 +120,4 @@ parse_categories()
 
 -- MPV events
 -- mp.register_event("file-loaded", file_loaded)
-mp.add_key_binding("g", "test", get_ranges)
+mp.add_key_binding("g", "test", get_segments)
