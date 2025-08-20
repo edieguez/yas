@@ -18,10 +18,6 @@ skip_segments_endpoint = ("%s/api/skipSegments"):format(options.server_address)
 segments = nil
 categories = nil
 
--- Debug variables start
-youtube_id = "wMGNBQ1HvGc"
--- Debug variables end
-
 function file_loaded()
     mp.msg.debug("file_loaded() function")
 
@@ -44,6 +40,11 @@ function file_loaded()
 
     if not youtube_id or string.len(youtube_id) < 11 then return end
     youtube_id = string.sub(youtube_id, 1, 11)
+
+    if not categories then
+        parse_categories()
+    end
+    get_segments()
 end
 
 function get_segments()
@@ -72,7 +73,11 @@ function get_segments()
     segments = utils.parse_json(response.stdout)
     mp.msg.debug("get_segments() segments: ", utils.to_string(segments))
 
-    create_chapters()
+    -- Create chapters if segments were found
+    if segments and #segments > 0 then
+        create_chapters()
+        mp.observe_property("time-pos", "native", skip_ads)
+    end
 end
 
 function create_chapters()
@@ -107,6 +112,21 @@ function time_sort(a, b)
     return a.time < b.time
 end
 
+function skip_ads(name, pos)
+    if pos ~= nil then
+        for _, segment in ipairs(segments) do
+            local start_time = segment.segment[1]
+            local end_time = segment.segment[2]
+            if start_time <= pos and end_time > pos then
+                -- Display message and skip to the end of the ad segment
+                mp.osd_message(("[sponsorblock] skipping %ds"):format(math.floor(end_time - mp.get_property("time-pos"))))
+                mp.set_property("time-pos", end_time + 0.001) -- Adding a small offset to avoid issues
+                return
+            end
+        end
+    end
+end
+
 function parse_categories()
     categories = {}
     for category in string.gmatch(options.categories, "([^,]+)") do
@@ -115,9 +135,6 @@ function parse_categories()
     options.categories = table.concat(categories, ",")
 end
 
--- Init section
-parse_categories()
-
 -- MPV events
--- mp.register_event("file-loaded", file_loaded)
-mp.add_key_binding("g", "test", get_segments)
+mp.register_event("file-loaded", file_loaded)
+mp.register_event("end-file", end_file)
