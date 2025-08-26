@@ -27,6 +27,27 @@ local skip_segments_endpoint = ("%s/api/skipSegments"):format(options.server_add
 local segments = nil
 local youtube_id = nil
 
+local function curl_get(endpoint, ...)
+    local curl_cmd = {
+        "curl", "--location", "--silent", "--get",
+        endpoint
+    }
+
+    for _, param in ipairs({...}) do
+        table.insert(curl_cmd, "--data")
+        table.insert(curl_cmd, param)
+    end
+
+    mp.msg.debug(table.concat(curl_cmd, " "))
+
+    return mp.command_native{
+        name = "subprocess",
+        capture_stdout = true,
+        playback_only = false,
+        args = curl_cmd
+    }
+end
+
 -- Detect YouTube video ID from multiple sources
 local function detect_youtube_id()
     local video_path = mp.get_property("path", "")
@@ -56,22 +77,7 @@ local function get_segments()
 
     local cstr = ("categories=[%s]"):format(options.categories)
     local vstr = ("videoID=%s"):format(youtube_id)
-
-    local curl_cmd = {
-        "curl", "-L", "-s", "-G",
-        "-d", cstr,
-        "-d", vstr,
-        skip_segments_endpoint
-    }
-
-    mp.msg.debug(table.concat(curl_cmd, " "))
-
-    local response = mp.command_native{
-        name = "subprocess",
-        capture_stdout = true,
-        playback_only = false,
-        args = curl_cmd
-    }
+    local response = curl_get(skip_segments_endpoint, cstr, vstr)
 
     if not response or response.status ~= 0 or not response.stdout or response.stdout == "" then
         mp.msg.warn("SponsorBlock API request failed")
@@ -98,7 +104,8 @@ local function get_segments()
                     start_time = start_time,
                     end_time = end_time,
                     category = seg.category or "unknown",
-                    uuid = seg.UUID or "------"
+                    uuid = seg.UUID or "------",
+                    action = seg.action or "unknown"
                 })
             end
         end
@@ -136,7 +143,9 @@ function create_chapters()
         })
     end
 
+    -- Sort to avoid overlapping / unordered chapters
     table.sort(chapters, function(a, b) return a.time < b.time end)
+
     mp.set_property_native("chapter-list", chapters)
     mp.msg.debug("Updated chapter-list: " .. utils.to_string(chapters))
 end
