@@ -21,21 +21,27 @@ do
 end
 
 -- Endpoint variables
-local skip_segments_endpoint = ("%s/api/skipSegments"):format(options.server_address)
+local endpoints = {
+    skip_segments = ("%s/api/skipSegments"):format(options.server_address)
+}
 
 -- State variables
 local segments = nil
 local youtube_id = nil
 
-local function curl_get(endpoint, ...)
-    local curl_cmd = {
-        "curl", "--location", "--silent", "--get",
-        endpoint
-    }
+local function curl(url, method, query_params)
+    local curl_cmd = { "curl", "--location", "--silent" }
+    if method == "GET" then
+        table.insert(curl_cmd, "--get")
+    else
+        table.insert(curl_cmd, "--request")
+        table.insert(curl_cmd, method)
+    end
+    table.insert(curl_cmd, url)
 
-    for _, param in ipairs({...}) do
-        table.insert(curl_cmd, "--data")
-        table.insert(curl_cmd, param)
+    for key, value in pairs(query_params) do
+        table.insert(curl_cmd, "--data-urlencode")
+        table.insert(curl_cmd, ("%s=%s"):format(key, value))
     end
 
     mp.msg.debug(table.concat(curl_cmd, " "))
@@ -75,9 +81,10 @@ end
 local function get_segments()
     if not youtube_id then return end
 
-    local cstr = ("categories=[%s]"):format(options.categories)
-    local vstr = ("videoID=%s"):format(youtube_id)
-    local response = curl_get(skip_segments_endpoint, cstr, vstr)
+    local response = curl(endpoints.skip_segments, "GET", {
+        categories = ("[%s]"):format(options.categories),
+        videoID = youtube_id
+    })
 
     if not response or response.status ~= 0 or not response.stdout or response.stdout == "" then
         mp.msg.warn("SponsorBlock API request failed")
