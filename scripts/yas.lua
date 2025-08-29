@@ -1,4 +1,8 @@
 -- Yet Another Sponsorblock plugin for MPV
+-- Based on
+--   https://github.com/po5/mpv_sponsorblock
+--   https://codeberg.org/jouni/mpv_sponsorblock_minimal
+
 local utils = require "mp.utils"
 local mpoptions = require "mp.options"
 
@@ -22,7 +26,8 @@ end
 
 -- Endpoint variables
 local endpoints = {
-    skip_segments = ("%s/api/skipSegments"):format(options.server_address)
+    skip_segments = ("%s/api/skipSegments"):format(options.server_address),
+    viewed_video_sponsor_time = ("%s/api/viewedVideoSponsorTime"):format(options.server_address)
 }
 
 -- State variables
@@ -39,9 +44,11 @@ local function curl(url, method, query_params)
     end
     table.insert(curl_cmd, url)
 
-    for key, value in pairs(query_params) do
-        table.insert(curl_cmd, "--data-urlencode")
-        table.insert(curl_cmd, ("%s=%s"):format(key, value))
+    if query_params then
+        for key, value in pairs(query_params) do
+            table.insert(curl_cmd, "--data-urlencode")
+            table.insert(curl_cmd, ("%s=%s"):format(key, value))
+        end
     end
 
     mp.msg.debug(table.concat(curl_cmd, " "))
@@ -108,11 +115,14 @@ local function get_segments()
             local start_time, end_time = tonumber(seg.segment[1]), tonumber(seg.segment[2])
             if start_time and end_time and end_time > start_time then
                 table.insert(segments, {
+                    uuid = seg.UUID,
+                    short_uuid = string.sub(seg.UUID, 1, 6),
+                    category = seg.category,
+                    action = seg.action,
                     start_time = start_time,
                     end_time = end_time,
-                    category = seg.category or "unknown",
-                    uuid = seg.UUID or "------",
-                    action = seg.action or "unknown"
+                    skipped = false,
+                    skip_reported = false
                 })
             end
         end
@@ -137,7 +147,7 @@ function create_chapters()
         -- Start marker
         table.insert(chapters, {
             title = segment.category:gsub("^%l", string.upper):gsub("_", " ")
-                .. " (" .. string.sub(segment.uuid, 1, 6) .. ")",
+                .. " (" .. segment.short_uuid .. ")",
             time = (not duration or duration > segment.start_time)
                 and segment.start_time or duration - 0.001
         })
@@ -167,9 +177,19 @@ function skip_ads(_, pos)
                 segment.end_time - segment.start_time
             ))
             mp.set_property("time-pos", segment.end_time + 0.001)
+            segment.skipped = true
+
+            report_skip(segment)
+            segment.skip_reported = true
             return
         end
     end
+end
+
+local function report_skip(segment)
+    if not segment or segment.skip_reported then return end
+    curl(("%s?UUID=%s"):format(endpoints.skip_segment, segment.uuid), "POST")
+    mp.msg.debug("Reported skip for segment " .. segment.short_uuid)
 end
 
 -- MPV Events
