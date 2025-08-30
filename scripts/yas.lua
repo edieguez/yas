@@ -9,10 +9,11 @@ local mpoptions = require "mp.options"
 -- Default options
 local options = {
     server_address = "https://sponsor.ajay.app",
-    categories = "sponsor,selfpromo,interaction,intro,outro,preview,hook,filler"
+    categories = "sponsor,selfpromo,interaction,intro,outro,preview,hook,filler",
+    user_id = ""
 }
 
--- Load options from config file: yas.conf
+-- Load options from config file: script-opts/yas.conf
 mpoptions.read_options(options, "yas")
 
 -- Parse categories into API-friendly format once
@@ -27,7 +28,8 @@ end
 -- Endpoint variables
 local endpoints = {
     skip_segments = ("%s/api/skipSegments"):format(options.server_address),
-    viewed_video_sponsor_time = ("%s/api/viewedVideoSponsorTime"):format(options.server_address)
+    viewed_video_sponsor_time = ("%s/api/viewedVideoSponsorTime"):format(options.server_address),
+    user_stats = ("%s/api/userStats"):format(options.server_address)
 }
 
 -- State variables
@@ -51,22 +53,50 @@ local function http_request(url, method, query_params)
         end
     end
     mp.msg.debug("🐚 [yas] curl command: " .. table.concat(curl_cmd, " "))
+
     local result = mp.command_native{
         name = "subprocess",
         capture_stdout = true,
         playback_only = false,
         args = curl_cmd
     }
-    if result then
-        if result.status == 0 then
-            mp.msg.debug("✅ [yas] curl succeeded (status: 0)")
-        else
-            mp.msg.warn("❌ [yas] curl failed (status: " .. tostring(result.status) .. ")")
+
+    -- Centralized error handling
+    if not result then
+        mp.msg.warn("❌ [yas] HTTP request failed: no result from curl")
+        return nil, "No result from curl"
+    end
+
+    if result.status ~= 0 then
+        mp.msg.warn("❌ [yas] HTTP request failed: curl status " .. tostring(result.status))
+        return nil, "Curl failed with status " .. tostring(result.status)
+    end
+
+    if not result.stdout or result.stdout == "" then
+        mp.msg.warn("❌ [yas] HTTP request failed: empty response")
+        return nil, "Empty response"
+    end
+
+    if result.stdout == "Not Found" then
+        mp.msg.warn("🚫 [yas] HTTP request failed: 404 Not Found")
+        return nil, "404 Not Found"
+    end
+
+    -- Try to parse JSON if response looks like JSON
+    local data = nil
+    if result.stdout:match("^%s*[%[%{]") then
+        data = utils.parse_json(result.stdout)
+        if not data then
+            mp.msg.warn("❌ [yas] HTTP request failed: invalid JSON response")
+            return nil, "Invalid JSON response"
         end
     else
-        mp.msg.warn("❌ [yas] curl failed (no result)")
+        -- For non-JSON responses (like simple POST acknowledgments)
+        data = result.stdout
     end
-    return result
+
+    mp.msg.debug("✅ [yas] HTTP request succeeded")
+    return data, nil
 end
 
 -- Detect YouTube video ID from multiple sources
@@ -100,25 +130,16 @@ local function get_segments()
         return
     end
     mp.msg.info("🌐 [yas] Fetching SponsorBlock segments for video: " .. youtube_id)
-    local response = http_request(endpoints.skip_segments, "GET", {
+    local data, error_msg = http_request(endpoints.skip_segments, "GET", {
         categories = ("[%s]"):format(options.categories),
         videoID = youtube_id
     })
-    if not response or response.status ~= 0 or not response.stdout or response.stdout == "" then
-        mp.msg.warn("❌ [yas] SponsorBlock API request failed")
-        return
-    end
-    if response.stdout == "Not Found" then
-        mp.msg.warn("🚫 [yas] SponsorBlock API returned 404 Not Found")
-        return
-    end
-    local parsed = utils.parse_json(response.stdout)
-    if not parsed then
-        mp.msg.warn("❌ [yas] Failed to parse SponsorBlock JSON")
+    if not data then
+        mp.msg.warn("❌ [yas] SponsorBlock API request failed: " .. (error_msg or "unknown error"))
         return
     end
     segments = {}
-    for _, seg in ipairs(parsed) do
+    for _, seg in ipairs(data) do
         if seg.segment and #seg.segment == 2 then
             local start_time, end_time = tonumber(seg.segment[1]), tonumber(seg.segment[2])
             if start_time and end_time and end_time > start_time then
@@ -169,8 +190,13 @@ end
 local function report_skip(segment)
     if not segment or segment.skip_reported then return end
     mp.msg.debug("📤 [yas] Reporting skip for segment " .. segment.short_uuid)
-    http_request(("%s?UUID=%s"):format(endpoints.viewed_video_sponsor_time, segment.uuid), "POST")
-    mp.msg.info("✅ [yas] Reported skip for segment " .. segment.short_uuid)
+    local data, error_msg = http_request(("%s?UUID=%s"):format(endpoints.viewed_video_sponsor_time, segment.uuid), "POST")
+    if data then
+        mp.msg.info("✅ [yas] Reported skip for segment " .. segment.short_uuid)
+        segment.skip_reported = true
+    else
+        mp.msg.warn("❌ [yas] Failed to report skip for segment " .. segment.short_uuid .. ": " .. (error_msg or "unknown error"))
+    end
 end
 
 -- Skip segments automatically
@@ -182,10 +208,23 @@ function skip_ads(_, pos)
             mp.msg.info(("⏭️ [yas] Skipping segment: %s [%s - %s]"):format(segment.category, segment.start_time, segment.end_time))
             mp.set_property("time-pos", segment.end_time + 0.001)
             report_skip(segment)
-            segment.skip_reported = true
             return
         end
     end
+end
+
+local function get_user_stats()
+    mp.msg.info("🌐 [yas] Fetching user stats for userID: " .. options.user_id)
+    local data, error_msg = http_request(endpoints.user_stats, "GET", {
+        userID = options.user_id,
+        fetchCategoryStats = true,
+        fetchActionTypeStats = true
+    })
+    if not data then
+        mp.msg.warn("❌ [yas] Failed to get user stats: " .. (error_msg or "unknown error"))
+        return
+    end
+    mp.msg.info("📊 [yas] User stats: " .. utils.to_string(data))
 end
 
 -- MPV Events
@@ -205,6 +244,12 @@ local function end_file()
     segments = nil
     youtube_id = nil
     mp.unobserve_property(skip_ads)
+end
+
+-- Keybinding to show user stats
+if options.user_id and string.gmatch(options.user_id, "^\\w{36}$") then
+    mp.msg.info(("ℹ️ [yas] Found user_id %s in config"):format(options.user_id))
+    mp.add_key_binding("z", "show_user_stats", get_user_stats)
 end
 
 -- Register events
