@@ -36,6 +36,11 @@ local endpoints = {
 local segments = nil
 local youtube_id = nil
 
+-- User stats caching variables
+local cached_user_stats = nil
+local last_stats_fetch_time = 0
+local stats_cache_duration = 300 -- 5 minutes in seconds
+
 local function http_request(url, method, query_params)
     local curl_cmd = { "curl", "--location", "--silent" }
     method = method or "GET"
@@ -213,7 +218,176 @@ function skip_ads(_, pos)
     end
 end
 
+local function format_user_stats(data)
+    if not data then return "No user stats available" end
+
+    local lines = {}
+    local username = data.userName or "Unknown User"
+    table.insert(lines, "SponsorBlock user stats for " .. username)
+    table.insert(lines, string.rep("=", 35))
+
+    -- Overall stats
+    if data.overallStats then
+        table.insert(lines, "Overall Statistics:")
+        if data.overallStats.minutesSaved then
+            local hours = math.floor(data.overallStats.minutesSaved / 60)
+            local minutes = math.floor(data.overallStats.minutesSaved % 60)
+            table.insert(lines, string.format("  %-25s %s", "Time Saved:", hours .. "h " .. minutes .. "m"))
+        end
+        if data.overallStats.segmentCount then
+            table.insert(lines, string.format("  %-25s %s", "Segments Submitted:", data.overallStats.segmentCount))
+        end
+    end
+
+    -- Category breakdown
+    if data.categoryCount then
+        table.insert(lines, "")
+        table.insert(lines, "Segments by Category:")
+        local categories = {
+            {key = "sponsor", name = "Sponsor"},
+            {key = "intro", name = "Intro"},
+            {key = "outro", name = "Outro"},
+            {key = "interaction", name = "Interaction"},
+            {key = "selfpromo", name = "Self Promo"},
+            {key = "music_offtopic", name = "Music/Off-topic"},
+            {key = "preview", name = "Preview"},
+            {key = "filler", name = "Filler"},
+            {key = "poi_highlight", name = "Highlight"},
+            {key = "exclusive_access", name = "Exclusive Access"},
+            {key = "chapter", name = "Chapter"}
+        }
+
+        for _, cat in ipairs(categories) do
+            local count = data.categoryCount[cat.key]
+            if count and count > 0 then
+                table.insert(lines, string.format("  %-25s %s", cat.name .. ":", count))
+            end
+        end
+    end
+
+    -- Action type breakdown
+    if data.actionTypeCount then
+        table.insert(lines, "")
+        table.insert(lines, "Segments by Action Type:")
+        local actions = {
+            {key = "skip", name = "Skip"},
+            {key = "mute", name = "Mute"},
+            {key = "full", name = "Full Video"},
+            {key = "poi", name = "Point of Interest"},
+            {key = "chapter", name = "Chapter"}
+        }
+
+        for _, action in ipairs(actions) do
+            local count = data.actionTypeCount[action.key]
+            if count and count > 0 then
+                table.insert(lines, string.format("  %-25s %s", action.name .. ":", count))
+            end
+        end
+    end
+
+    table.insert(lines, "")
+    table.insert(lines, "Press 'z' to close")
+
+    return table.concat(lines, "\n")
+end
+
+-- Dialog system (modernz-style)
+local assdraw = require 'mp.assdraw'
+local stats_overlay = nil
+
+local function show_stats_dialog(content)
+    -- Create overlay if it doesn't exist
+    if not stats_overlay then
+        stats_overlay = mp.create_osd_overlay("ass-events")
+    end
+
+    -- Get screen dimensions
+    local screen_width, screen_height, display_aspect = mp.get_osd_size()
+
+    -- Create ASS content using assdraw
+    local ass = assdraw.ass_new()
+
+    -- Calculate content-based dimensions
+    local lines = {}
+    for line in content:gmatch("[^\n]+") do
+        table.insert(lines, line)
+    end
+
+    -- Base font size for calculations
+    local base_font_size = math.max(18, screen_height / 40)
+
+    -- Calculate box dimensions based on content
+    local max_line_length = 0
+    for _, line in ipairs(lines) do
+        if #line > max_line_length then
+            max_line_length = #line
+        end
+    end
+
+    -- Dynamic sizing based on content with padding
+    local char_width = base_font_size * 0.5  -- More accurate character width for Courier New
+    local line_height = base_font_size * 1.1  -- Tighter line height to match actual text
+    local vertical_padding = base_font_size * 0.8  -- Padding proportional to font size
+    local horizontal_padding = base_font_size * 1.2  -- Reduced horizontal padding
+
+    local box_width = (max_line_length + 1) * char_width + horizontal_padding  -- Width fits content + one extra character spacing
+    local text_height = (#lines - 1) * line_height + base_font_size  -- More accurate: (n-1) line spaces + 1 font height
+    local box_height = text_height + vertical_padding
+    local box_x = (screen_width - box_width) / 2
+    local box_y = (screen_height - box_height) / 2
+
+    ass:new_event()
+    ass:pos(box_x, box_y)
+    ass:an(7)
+    ass:append("{\\bord2\\shad3\\c&H000000&\\3c&H666666&\\4c&H000000&\\alpha&H80&}")
+    ass:draw_start()
+    ass:rect_cw(0, 0, box_width, box_height)
+    ass:draw_stop()
+
+    -- Text content (using calculated font size)
+    ass:new_event()
+    ass:pos(box_x + horizontal_padding / 2, box_y + vertical_padding / 2)  -- Position text with half the padding from edges
+    ass:an(7)  -- Top-left alignment like a book's index
+    ass:append("{\\fs" .. base_font_size .. "\\fn" .. "Courier New" .. "\\c&HFFFFFF&\\bord1\\3c&H000000&\\q2}")
+    ass:append(content:gsub("\n", "\\N"))
+
+    -- Update overlay with calculated dimensions
+    stats_overlay.data = ass.text
+    stats_overlay.res_x = screen_width
+    stats_overlay.res_y = screen_height
+    stats_overlay:update()
+end
+
+local function hide_stats_dialog()
+    if stats_overlay then
+        stats_overlay.data = ""
+        stats_overlay:update()
+    end
+end
+
+local stats_visible = false
+
 local function get_user_stats()
+    -- If stats are already visible, hide them
+    if stats_visible then
+        hide_stats_dialog()
+        stats_visible = false
+        mp.msg.info("📊 [yas] User stats dialog closed")
+        return
+    end
+
+    local current_time = os.time()
+
+    -- Check if we have cached data that's still valid (within 5 minutes)
+    if cached_user_stats and (current_time - last_stats_fetch_time) < stats_cache_duration then
+        mp.msg.info("📊 [yas] Using cached user stats (fetched " .. (current_time - last_stats_fetch_time) .. "s ago)")
+        local formatted_stats = format_user_stats(cached_user_stats)
+        show_stats_dialog(formatted_stats)
+        stats_visible = true
+        return
+    end
+
+    -- Need to fetch new data (either no cache or cache expired)
     mp.msg.info("🌐 [yas] Fetching user stats for userID: " .. options.user_id)
     local data, error_msg = http_request(endpoints.user_stats, "GET", {
         userID = options.user_id,
@@ -221,10 +395,28 @@ local function get_user_stats()
         fetchActionTypeStats = true
     })
     if not data then
-        mp.msg.warn("❌ [yas] Failed to get user stats: " .. (error_msg or "unknown error"))
+        -- If fetch fails but we have cached data, use it anyway
+        if cached_user_stats then
+            mp.msg.warn("⚠️ [yas] Failed to fetch fresh stats, using cached data: " .. (error_msg or "unknown error"))
+            local formatted_stats = format_user_stats(cached_user_stats)
+            show_stats_dialog(formatted_stats)
+            stats_visible = true
+        else
+            mp.osd_message("❌ Failed to get user stats: " .. (error_msg or "unknown error"), 5)
+            mp.msg.warn("❌ [yas] Failed to get user stats: " .. (error_msg or "unknown error"))
+        end
         return
     end
-    mp.msg.info("📊 [yas] User stats: " .. utils.to_string(data))
+
+    -- Successfully fetched new data - update cache
+    cached_user_stats = data
+    last_stats_fetch_time = current_time
+    mp.msg.info("📊 [yas] User stats fetched and cached")
+
+    local formatted_stats = format_user_stats(data)
+    show_stats_dialog(formatted_stats)
+    stats_visible = true
+    mp.msg.info("📊 [yas] User stats dialog displayed")
 end
 
 -- MPV Events
@@ -243,13 +435,18 @@ local function end_file()
     mp.msg.info("🛑 [yas] End of file event. Resetting state.")
     segments = nil
     youtube_id = nil
+    -- Clear user stats cache when file ends
+    cached_user_stats = nil
+    last_stats_fetch_time = 0
     mp.unobserve_property(skip_ads)
 end
 
 -- Keybinding to show user stats
-if options.user_id and string.gmatch(options.user_id, "^\\w{36}$") then
+if options.user_id and #options.user_id >= 32 and string.match(options.user_id, "^%w+$") then
     mp.msg.info(("ℹ️ [yas] Found user_id %s in config"):format(options.user_id))
     mp.add_key_binding("z", "show_user_stats", get_user_stats)
+else
+    mp.msg.warn("⚠️ [yas] No valid user_id configured, user stats keybinding disabled")
 end
 
 -- Register events
