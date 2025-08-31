@@ -16,6 +16,21 @@ local options = {
 -- Load options from config file: script-opts/yas.conf
 mpoptions.read_options(options, "yas")
 
+-- Generate local userID if not set (required for submissions)
+if not options.user_id or #options.user_id < 30 then
+    -- Generate a random 32-character userID for submissions
+    local chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+    local user_id = ""
+    math.randomseed(os.time())
+    for i = 1, 32 do
+        local rand = math.random(1, #chars)
+        user_id = user_id .. string.sub(chars, rand, rand)
+    end
+    options.user_id = user_id
+    mp.msg.info("🆔 [yas] Generated new local userID for submissions: " .. options.user_id)
+    mp.msg.info("💾 [yas] Add this to your yas.conf file: user_id=" .. options.user_id)
+end
+
 -- Parse categories into API-friendly format once
 do
     local cats = {}
@@ -29,7 +44,8 @@ end
 local endpoints = {
     skip_segments = ("%s/api/skipSegments"):format(options.server_address),
     viewed_video_sponsor_time = ("%s/api/viewedVideoSponsorTime"):format(options.server_address),
-    user_stats = ("%s/api/userStats"):format(options.server_address)
+    user_stats = ("%s/api/userStats"):format(options.server_address),
+    submit_segments = ("%s/api/skipSegments"):format(options.server_address)
 }
 
 -- State variables
@@ -41,22 +57,39 @@ local cached_user_stats = nil
 local last_stats_fetch_time = 0
 local stats_cache_duration = 300 -- 5 minutes in seconds
 
-local function http_request(url, method, query_params)
+-- Segment submission variables
+local marking_segment = false
+local segment_start_time = nil
+local current_overlay = nil
+local segment_dialog_visible = false
+
+local function http_request(url, method, query_params, json_body)
     local curl_cmd = { "curl", "--location", "--silent" }
     method = method or "GET"
+    
     if method == "GET" then
         table.insert(curl_cmd, "--get")
     else
         table.insert(curl_cmd, "--request")
         table.insert(curl_cmd, method)
     end
+    
     table.insert(curl_cmd, url)
-    if query_params then
+    
+    -- Handle JSON body for POST requests
+    if json_body then
+        table.insert(curl_cmd, "--header")
+        table.insert(curl_cmd, "Content-Type: application/json")
+        table.insert(curl_cmd, "--data")
+        table.insert(curl_cmd, json_body)
+    elseif query_params then
+        -- Handle URL parameters for GET requests
         for key, value in pairs(query_params) do
             table.insert(curl_cmd, "--data-urlencode")
             table.insert(curl_cmd, ("%s=%s"):format(key, value))
         end
     end
+    
     mp.msg.debug("🐚 [yas] curl command: " .. table.concat(curl_cmd, " "))
 
     local result = mp.command_native{
@@ -325,13 +358,13 @@ local function show_stats_dialog(content)
     end
 
     -- Dynamic sizing based on content with padding
-    local char_width = base_font_size * 0.5  -- More accurate character width for Courier New
-    local line_height = base_font_size * 1.1  -- Tighter line height to match actual text
-    local vertical_padding = base_font_size * 0.8  -- Padding proportional to font size
-    local horizontal_padding = base_font_size * 1.2  -- Reduced horizontal padding
+    local char_width = base_font_size * 0.5  -- Precise character width for Courier New
+    local line_height = base_font_size * 1.1  -- Tight line height to match actual text
+    local vertical_padding = base_font_size * 0.8  -- Minimal vertical padding
+    local horizontal_padding = base_font_size * 1.2  -- Minimal horizontal padding
 
-    local box_width = (max_line_length + 1) * char_width + horizontal_padding  -- Width fits content + one extra character spacing
-    local text_height = (#lines - 1) * line_height + base_font_size  -- More accurate: (n-1) line spaces + 1 font height
+    local box_width = (max_line_length + 1) * char_width + horizontal_padding  -- Width fits content tightly
+    local text_height = (#lines - 1) * line_height + base_font_size  -- Precise text height calculation
     local box_height = text_height + vertical_padding
     local box_x = (screen_width - box_width) / 2
     local box_y = (screen_height - box_height) / 2
@@ -347,7 +380,7 @@ local function show_stats_dialog(content)
     -- Text content (using calculated font size)
     ass:new_event()
     ass:pos(box_x + horizontal_padding / 2, box_y + vertical_padding / 2)  -- Position text with half the padding from edges
-    ass:an(7)  -- Top-left alignment like a book's index
+    ass:an(7)  -- Top-left alignment
     ass:append("{\\fs" .. base_font_size .. "\\fn" .. "Courier New" .. "\\c&HFFFFFF&\\bord1\\3c&H000000&\\q2}")
     ass:append(content:gsub("\n", "\\N"))
 
@@ -419,6 +452,232 @@ local function get_user_stats()
     mp.msg.info("📊 [yas] User stats dialog displayed")
 end
 
+-- Segment Categories for submission dialog
+local segment_categories = {
+    {key = "sponsor", name = "Sponsor", desc = "Paid promotion, paid referrals and direct advertisements"},
+    {key = "selfpromo", name = "Unpaid/Self Promotion", desc = "Similar to sponsor but for unpaid content"},
+    {key = "interaction", name = "Interaction Reminder", desc = "Reminders to like, subscribe, follow, etc."},
+    {key = "intro", name = "Intermission/Intro Animation", desc = "Intro sequences, animations, or intermissions"},
+    {key = "outro", name = "Endcards/Credits", desc = "End credits, endcards, or outros"},
+    {key = "preview", name = "Preview/Recap", desc = "Collection of clips showing what's coming up"},
+    {key = "filler", name = "Filler Tangent", desc = "Tangential content that is not required"},
+    {key = "music_offtopic", name = "Non-Music Section", desc = "Only for music videos, covers non-music portions"}
+}
+
+-- Create segment submission dialog content
+local function create_segment_dialog_content(start_time, end_time, selected_index)
+    selected_index = selected_index or 1
+    local lines = {}
+    table.insert(lines, string.format("Submit Segment: %.1f - %.1f seconds", start_time, end_time))
+    table.insert(lines, "")
+    table.insert(lines, "Select category:")
+    
+    for i, category in ipairs(segment_categories) do
+        local prefix = (selected_index == i) and "► " or "  "
+        table.insert(lines, string.format("%s%d. %s", prefix, i, category.name))
+    end
+    
+    table.insert(lines, "")
+    table.insert(lines, "↑/↓: Navigate  Enter: Submit  Esc: Cancel")
+    
+    return table.concat(lines, "\n")
+end
+
+-- Submit segment to SponsorBlock API
+local function submit_segment(start_time, end_time, category)
+    if not youtube_id then
+        mp.osd_message("❌ No YouTube video detected", 3)
+        return
+    end
+    
+    mp.msg.info(string.format("📤 [yas] Submitting %s segment: %.1f - %.1f", category, start_time, end_time))
+    mp.msg.debug(string.format("🔑 [yas] Using userID: %s", options.user_id))
+    
+    -- Get video duration for submission
+    local video_duration = mp.get_property_number("duration") or 0
+    
+    -- Create JSON payload in the format you discovered
+    local json_payload = {
+        videoID = youtube_id,
+        userID = options.user_id,
+        segments = {
+            {
+                segment = {start_time, end_time},
+                category = category,
+                actionType = "skip"
+            }
+        },
+        service = "YouTube"
+    }
+    
+    -- Add video duration if available
+    if video_duration > 0 then
+        json_payload.videoDuration = video_duration
+    end
+    
+    -- Convert to JSON string
+    local json_string = utils.format_json(json_payload)
+    
+    mp.msg.debug("📋 [yas] JSON payload for SponsorBlock submission:")
+    mp.msg.debug(json_string)
+    
+    -- Make the request using JSON body
+    local data, error_msg = http_request(endpoints.submit_segments, "POST", nil, json_string)
+    
+    if data then
+        mp.osd_message("✅ Segment submitted successfully", 3)
+        mp.msg.info("✅ [yas] Segment submitted successfully")
+        mp.msg.info("📊 [yas] Response: " .. utils.to_string(data))
+        -- Refresh segments to include our submission
+        get_segments()
+    else
+        mp.osd_message("❌ Failed to submit segment: " .. (error_msg or "unknown error"), 5)
+        mp.msg.warn("❌ [yas] Failed to submit segment: " .. (error_msg or "unknown error"))
+    end
+end
+
+-- Show segment submission dialog
+local function show_segment_dialog(start_time, end_time)
+    segment_dialog_visible = true
+    local selected_index = 1
+    
+    -- Function to update dialog content with current selection
+    local function update_dialog_content()
+        local content = create_segment_dialog_content(start_time, end_time, selected_index)
+        show_stats_dialog(content)
+    end
+    
+    -- Function to clean up all key bindings
+    local function cleanup_bindings()
+        mp.remove_key_binding("segment_dialog_up")
+        mp.remove_key_binding("segment_dialog_down")
+        mp.remove_key_binding("segment_dialog_enter")
+        mp.remove_key_binding("segment_dialog_escape")
+        -- Also remove number key bindings for backward compatibility
+        for j = 1, #segment_categories do
+            mp.remove_key_binding("segment_category_" .. j)
+        end
+    end
+    
+    -- Function to submit the selected segment
+    local function submit_selected_segment()
+        hide_stats_dialog()
+        segment_dialog_visible = false
+        cleanup_bindings()
+        
+        local category = segment_categories[selected_index]
+        submit_segment(start_time, end_time, category.key)
+    end
+    
+    -- Function to cancel dialog
+    local function cancel_dialog()
+        hide_stats_dialog()
+        segment_dialog_visible = false
+        cleanup_bindings()
+        mp.osd_message("Segment submission cancelled", 2)
+    end
+    
+    -- Function to move selection up
+    local function move_up()
+        selected_index = selected_index - 1
+        if selected_index < 1 then
+            selected_index = #segment_categories
+        end
+        update_dialog_content()
+    end
+    
+    -- Function to move selection down
+    local function move_down()
+        selected_index = selected_index + 1
+        if selected_index > #segment_categories then
+            selected_index = 1
+        end
+        update_dialog_content()
+    end
+    
+    -- Function to handle number key selection (for backward compatibility)
+    local function handle_category_key(category_index)
+        if category_index >= 1 and category_index <= #segment_categories then
+            selected_index = category_index
+            update_dialog_content()
+        end
+    end
+    
+    -- Initial display
+    update_dialog_content()
+    
+    -- Bind arrow keys for navigation
+    mp.add_forced_key_binding("UP", "segment_dialog_up", move_up)
+    mp.add_forced_key_binding("DOWN", "segment_dialog_down", move_down)
+    
+    -- Bind Enter for submission
+    mp.add_forced_key_binding("ENTER", "segment_dialog_enter", submit_selected_segment)
+    
+    -- Bind Escape to cancel
+    mp.add_forced_key_binding("ESC", "segment_dialog_escape", cancel_dialog)
+    
+    -- Bind number keys for backward compatibility
+    for i = 1, #segment_categories do
+        mp.add_forced_key_binding(tostring(i), "segment_category_" .. i, function()
+            handle_category_key(i)
+        end)
+    end
+end
+
+-- Toggle segment marking (like SponsorBlock extension)
+local function toggle_segment_marking()
+    if segment_dialog_visible then
+        return -- Don't interfere with dialog
+    end
+    
+    if not youtube_id then
+        mp.osd_message("❌ SponsorBlock: YouTube video required", 3)
+        return
+    end
+    
+    local current_time = mp.get_property_number("time-pos")
+    if not current_time then
+        mp.osd_message("❌ Could not get current time", 3)
+        return
+    end
+    
+    if not marking_segment then
+        -- Start marking
+        segment_start_time = current_time
+        marking_segment = true
+        mp.osd_message(string.format("📍 Segment start marked at %.1f seconds", current_time), 3)
+        mp.msg.info(string.format("📍 [yas] Segment start marked at %.1f seconds", current_time))
+    else
+        -- End marking and show dialog
+        if current_time <= segment_start_time then
+            mp.osd_message("❌ End time must be after start time", 3)
+            return
+        end
+        
+        local duration = current_time - segment_start_time
+        if duration < 0.5 then
+            mp.osd_message("❌ Segment too short (minimum 0.5 seconds)", 3)
+            return
+        end
+        
+        marking_segment = false
+        mp.osd_message(string.format("🏁 Segment marked: %.1f - %.1f seconds", segment_start_time, current_time), 3)
+        mp.msg.info(string.format("🏁 [yas] Segment marked: %.1f - %.1f seconds", segment_start_time, current_time))
+        
+        show_segment_dialog(segment_start_time, current_time)
+    end
+end
+
+-- Cancel segment marking
+local function cancel_segment_marking()
+    if marking_segment then
+        marking_segment = false
+        segment_start_time = nil
+        mp.osd_message("❌ Segment marking cancelled", 2)
+        mp.msg.info("❌ [yas] Segment marking cancelled")
+    end
+end
+
 -- MPV Events
 local function file_loaded()
     mp.msg.info("🎬 [yas] File loaded event")
@@ -438,15 +697,30 @@ local function end_file()
     -- Clear user stats cache when file ends
     cached_user_stats = nil
     last_stats_fetch_time = 0
+    -- Reset segment submission state
+    marking_segment = false
+    segment_start_time = nil
+    segment_dialog_visible = false
+    if current_overlay then
+        hide_stats_dialog()
+    end
     mp.unobserve_property(skip_ads)
 end
 
 -- Keybinding to show user stats
-if options.user_id and #options.user_id >= 32 and string.match(options.user_id, "^%w+$") then
+if options.user_id and #options.user_id >= 30 and string.match(options.user_id, "^%w+$") then
     mp.msg.info(("ℹ️ [yas] Found user_id %s in config"):format(options.user_id))
     mp.add_key_binding("z", "show_user_stats", get_user_stats)
+    
+    -- Segment submission keybindings
+    mp.add_key_binding(";", "toggle_segment_marking", toggle_segment_marking)
+    mp.add_key_binding("ESC", "cancel_segment_marking", cancel_segment_marking)
+    
+    mp.msg.info("✅ [yas] Segment submission keybindings enabled:")
+    mp.msg.info("   ; : Start/End segment marking")
+    mp.msg.info("   Escape : Cancel segment marking")
 else
-    mp.msg.warn("⚠️ [yas] No valid user_id configured, user stats keybinding disabled")
+    mp.msg.warn("⚠️ [yas] No valid user_id configured, user stats and segment submission disabled")
 end
 
 -- Register events

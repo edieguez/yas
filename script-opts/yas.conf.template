@@ -2,5 +2,8 @@
 # https://wiki.sponsor.ajay.app/w/Types
 categories=sponsor,selfpromo,interaction,intro,outro,preview,hook,filler
 
-# Private user ID
+# Local user ID (required for submitting segments)
+# This should be a randomly generated 30+ character string stored locally
+# NOT the public userID from the stats page
+# Leave empty to auto-generate one (recommended)
 # user_id=
