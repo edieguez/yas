@@ -66,16 +66,16 @@ local segment_dialog_visible = false
 local function http_request(url, method, query_params, json_body)
     local curl_cmd = { "curl", "--location", "--silent" }
     method = method or "GET"
-    
+
     if method == "GET" then
         table.insert(curl_cmd, "--get")
     else
         table.insert(curl_cmd, "--request")
         table.insert(curl_cmd, method)
     end
-    
+
     table.insert(curl_cmd, url)
-    
+
     -- Handle JSON body for POST requests
     if json_body then
         table.insert(curl_cmd, "--header")
@@ -89,7 +89,7 @@ local function http_request(url, method, query_params, json_body)
             table.insert(curl_cmd, ("%s=%s"):format(key, value))
         end
     end
-    
+
     mp.msg.debug("🐚 [yas] curl command: " .. table.concat(curl_cmd, " "))
 
     local result = mp.command_native{
@@ -349,39 +349,92 @@ local function show_stats_dialog(content)
     -- Base font size for calculations
     local base_font_size = math.max(18, screen_height / 40)
 
-    -- Calculate box dimensions based on content
+    -- Calculate box dimensions based on content (improved modernz-style approach)
     local max_line_length = 0
     for _, line in ipairs(lines) do
-        if #line > max_line_length then
-            max_line_length = #line
+        -- More accurate length calculation - treat Unicode chars more conservatively
+        local display_length = 0
+        for i = 1, string.len(line) do
+            local byte = string.byte(line, i)
+            if byte and byte > 127 then
+                -- Unicode character - slightly wider but not as much
+                display_length = display_length + 1.2
+            else
+                -- ASCII character
+                display_length = display_length + 1
+            end
+        end
+
+        if display_length > max_line_length then
+            max_line_length = display_length
         end
     end
 
-    -- Dynamic sizing based on content with padding
-    local char_width = base_font_size * 0.5  -- Precise character width for Courier New
-    local line_height = base_font_size * 1.1  -- Tight line height to match actual text
-    local vertical_padding = base_font_size * 0.8  -- Minimal vertical padding
-    local horizontal_padding = base_font_size * 1.2  -- Minimal horizontal padding
+    -- More precise character width calculation (modernz-inspired)
+    -- Detect content type for appropriate sizing
+    local is_stats_dialog = string.find(content, "SponsorBlock user stats") or string.find(content, "Overall Statistics")
+    local is_category_dialog = string.find(content, "Submit Segment") or string.find(content, "Select category")
 
-    local box_width = (max_line_length + 1) * char_width + horizontal_padding  -- Width fits content tightly
-    local text_height = (#lines - 1) * line_height + base_font_size  -- Precise text height calculation
-    local box_height = text_height + vertical_padding
+    local char_width_ratio, vertical_padding_ratio, horizontal_padding_ratio
+
+    if is_category_dialog then
+        -- Very tight fit for category selection dialog (what you love!)
+        char_width_ratio = 0.58
+        if base_font_size >= 24 then
+            char_width_ratio = 0.56
+        elseif base_font_size <= 16 then
+            char_width_ratio = 0.6
+        end
+        vertical_padding_ratio = 0.3
+        horizontal_padding_ratio = 0.5
+    else
+        -- More generous fit for stats dialog (longer content)
+        char_width_ratio = 0.62
+        if base_font_size >= 24 then
+            char_width_ratio = 0.6
+        elseif base_font_size <= 16 then
+            char_width_ratio = 0.64
+        end
+        vertical_padding_ratio = 0.4
+        horizontal_padding_ratio = 0.75
+    end
+
+    local char_width = base_font_size * char_width_ratio
+    local line_height = base_font_size * 1.1   -- Consistent tight line height
+
+    -- Adaptive padding based on content type
+    local vertical_padding = base_font_size * vertical_padding_ratio
+    local horizontal_padding = char_width * horizontal_padding_ratio
+
+    -- Calculate precise content-fitted dimensions
+    local content_width = max_line_length * char_width
+    local box_width = content_width + (horizontal_padding * 2)
+    local text_height = (#lines - 1) * line_height + base_font_size
+    local box_height = text_height + (vertical_padding * 2)
+
+    -- Center the dialog
     local box_x = (screen_width - box_width) / 2
     local box_y = (screen_height - box_height) / 2
 
+    -- Round corner radius (inspired by modernz)
+    local corner_radius = math.min(12, base_font_size * 0.6)
+
+    -- Draw background box with rounded corners (modernz style)
     ass:new_event()
     ass:pos(box_x, box_y)
     ass:an(7)
-    ass:append("{\\bord2\\shad3\\c&H000000&\\3c&H666666&\\4c&H000000&\\alpha&H80&}")
+    ass:append("{\\bord0\\shad0\\c&H000000&\\alpha&H20&}")  -- Slightly more opaque for better visibility
     ass:draw_start()
-    ass:rect_cw(0, 0, box_width, box_height)
+    -- Use round_rect_cw for rounded corners like modernz
+    ass:round_rect_cw(0, 0, box_width, box_height, corner_radius)
     ass:draw_stop()
 
-    -- Text content (using calculated font size)
+    -- Text content with precise positioning (single layer with clean styling)
     ass:new_event()
-    ass:pos(box_x + horizontal_padding / 2, box_y + vertical_padding / 2)  -- Position text with half the padding from edges
+    ass:pos(box_x + horizontal_padding, box_y + vertical_padding)  -- Position with exact padding
     ass:an(7)  -- Top-left alignment
-    ass:append("{\\fs" .. base_font_size .. "\\fnmonospace\\c&HFFFFFF&\\bord1\\3c&H000000&\\q2}")
+    -- Clean text styling without competing borders/shadows
+    ass:append("{\\fs" .. base_font_size .. "\\fn@monospace\\c&HFFFFFF&\\bord0\\shad0\\q2}")
     ass:append(content:gsub("\n", "\\N"))
 
     -- Update overlay with calculated dimensions
@@ -467,19 +520,20 @@ local segment_categories = {
 -- Create segment submission dialog content
 local function create_segment_dialog_content(start_time, end_time, selected_index)
     selected_index = selected_index or 1
+    local duration = end_time - start_time
     local lines = {}
-    table.insert(lines, string.format("Submit Segment: %.1f - %.1f seconds", start_time, end_time))
+    table.insert(lines, string.format("Submit Segment: %.1f - %.1f seconds (%.1fs)", start_time, end_time, duration))
     table.insert(lines, "")
     table.insert(lines, "Select category:")
-    
+
     for i, category in ipairs(segment_categories) do
-        local prefix = (selected_index == i) and "► " or "  "
+        local prefix = (selected_index == i) and "> " or "   "
         table.insert(lines, string.format("%s%d. %s", prefix, i, category.name))
     end
-    
+
     table.insert(lines, "")
     table.insert(lines, "↑/↓: Navigate  Enter: Submit  Esc: Cancel")
-    
+
     return table.concat(lines, "\n")
 end
 
@@ -489,13 +543,13 @@ local function submit_segment(start_time, end_time, category)
         mp.osd_message("❌ No YouTube video detected", 3)
         return
     end
-    
+
     mp.msg.info(string.format("📤 [yas] Submitting %s segment: %.1f - %.1f", category, start_time, end_time))
     mp.msg.debug(string.format("🔑 [yas] Using userID: %s", options.user_id))
-    
+
     -- Get video duration for submission
     local video_duration = mp.get_property_number("duration") or 0
-    
+
     -- Create JSON payload in the format you discovered
     local json_payload = {
         videoID = youtube_id,
@@ -509,21 +563,21 @@ local function submit_segment(start_time, end_time, category)
         },
         service = "YouTube"
     }
-    
+
     -- Add video duration if available
     if video_duration > 0 then
         json_payload.videoDuration = video_duration
     end
-    
+
     -- Convert to JSON string
     local json_string = utils.format_json(json_payload)
-    
+
     mp.msg.debug("📋 [yas] JSON payload for SponsorBlock submission:")
     mp.msg.debug(json_string)
-    
+
     -- Make the request using JSON body
     local data, error_msg = http_request(endpoints.submit_segments, "POST", nil, json_string)
-    
+
     if data then
         mp.osd_message("✅ Segment submitted successfully", 3)
         mp.msg.info("✅ [yas] Segment submitted successfully")
@@ -540,13 +594,13 @@ end
 local function show_segment_dialog(start_time, end_time)
     segment_dialog_visible = true
     local selected_index = 1
-    
+
     -- Function to update dialog content with current selection
     local function update_dialog_content()
         local content = create_segment_dialog_content(start_time, end_time, selected_index)
         show_stats_dialog(content)
     end
-    
+
     -- Function to clean up all key bindings
     local function cleanup_bindings()
         mp.remove_key_binding("segment_dialog_up")
@@ -558,17 +612,17 @@ local function show_segment_dialog(start_time, end_time)
             mp.remove_key_binding("segment_category_" .. j)
         end
     end
-    
+
     -- Function to submit the selected segment
     local function submit_selected_segment()
         hide_stats_dialog()
         segment_dialog_visible = false
         cleanup_bindings()
-        
+
         local category = segment_categories[selected_index]
         submit_segment(start_time, end_time, category.key)
     end
-    
+
     -- Function to cancel dialog
     local function cancel_dialog()
         hide_stats_dialog()
@@ -576,7 +630,7 @@ local function show_segment_dialog(start_time, end_time)
         cleanup_bindings()
         mp.osd_message("Segment submission cancelled", 2)
     end
-    
+
     -- Function to move selection up
     local function move_up()
         selected_index = selected_index - 1
@@ -585,7 +639,7 @@ local function show_segment_dialog(start_time, end_time)
         end
         update_dialog_content()
     end
-    
+
     -- Function to move selection down
     local function move_down()
         selected_index = selected_index + 1
@@ -594,7 +648,7 @@ local function show_segment_dialog(start_time, end_time)
         end
         update_dialog_content()
     end
-    
+
     -- Function to handle number key selection (for backward compatibility)
     local function handle_category_key(category_index)
         if category_index >= 1 and category_index <= #segment_categories then
@@ -602,20 +656,20 @@ local function show_segment_dialog(start_time, end_time)
             update_dialog_content()
         end
     end
-    
+
     -- Initial display
     update_dialog_content()
-    
+
     -- Bind arrow keys for navigation
     mp.add_forced_key_binding("UP", "segment_dialog_up", move_up)
     mp.add_forced_key_binding("DOWN", "segment_dialog_down", move_down)
-    
+
     -- Bind Enter for submission
     mp.add_forced_key_binding("ENTER", "segment_dialog_enter", submit_selected_segment)
-    
+
     -- Bind Escape to cancel
     mp.add_forced_key_binding("ESC", "segment_dialog_escape", cancel_dialog)
-    
+
     -- Bind number keys for backward compatibility
     for i = 1, #segment_categories do
         mp.add_forced_key_binding(tostring(i), "segment_category_" .. i, function()
@@ -629,18 +683,18 @@ local function toggle_segment_marking()
     if segment_dialog_visible then
         return -- Don't interfere with dialog
     end
-    
+
     if not youtube_id then
         mp.osd_message("❌ SponsorBlock: YouTube video required", 3)
         return
     end
-    
+
     local current_time = mp.get_property_number("time-pos")
     if not current_time then
         mp.osd_message("❌ Could not get current time", 3)
         return
     end
-    
+
     if not marking_segment then
         -- Start marking
         segment_start_time = current_time
@@ -653,17 +707,17 @@ local function toggle_segment_marking()
             mp.osd_message("❌ End time must be after start time", 3)
             return
         end
-        
+
         local duration = current_time - segment_start_time
         if duration < 0.5 then
             mp.osd_message("❌ Segment too short (minimum 0.5 seconds)", 3)
             return
         end
-        
+
         marking_segment = false
         mp.osd_message(string.format("🏁 Segment marked: %.1f - %.1f seconds", segment_start_time, current_time), 3)
         mp.msg.info(string.format("🏁 [yas] Segment marked: %.1f - %.1f seconds", segment_start_time, current_time))
-        
+
         show_segment_dialog(segment_start_time, current_time)
     end
 end
@@ -711,11 +765,11 @@ end
 if options.user_id and #options.user_id >= 30 and string.match(options.user_id, "^%w+$") then
     mp.msg.info(("ℹ️ [yas] Found user_id %s in config"):format(options.user_id))
     mp.add_key_binding("z", "show_user_stats", get_user_stats)
-    
+
     -- Segment submission keybindings
     mp.add_key_binding(";", "toggle_segment_marking", toggle_segment_marking)
     mp.add_key_binding("ESC", "cancel_segment_marking", cancel_segment_marking)
-    
+
     mp.msg.info("✅ [yas] Segment submission keybindings enabled:")
     mp.msg.info("   ; : Start/End segment marking")
     mp.msg.info("   Escape : Cancel segment marking")
