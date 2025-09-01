@@ -242,7 +242,7 @@ function skip_ads(_, pos)
     if not pos or not segments then return end
     for _, segment in ipairs(segments) do
         if pos >= segment.start_time and pos < segment.end_time then
-            mp.osd_message(("[sponsorblock] Skipped %s (%.1fs)"):format(segment.category, segment.end_time - segment.start_time), 3)
+            show_toast(("[sponsorblock] Skipped %s (%.1fs)"):format(segment.category, segment.end_time - segment.start_time), 3)
             mp.msg.info(("⏭️ [yas] Skipping segment: %s [%s - %s]"):format(segment.category, segment.start_time, segment.end_time))
             mp.set_property("time-pos", segment.end_time + 0.001)
             report_skip(segment)
@@ -327,6 +327,72 @@ end
 -- Dialog system (modernz-style)
 local assdraw = require 'mp.assdraw'
 local stats_overlay = nil
+local toast_overlay = nil
+
+function show_toast(message, duration)
+    duration = duration or 3
+
+    -- Create toast overlay if it doesn't exist
+    if not toast_overlay then
+        toast_overlay = mp.create_osd_overlay("ass-events")
+    end
+
+    -- Get screen dimensions
+    local screen_width, screen_height, display_aspect = mp.get_osd_size()
+
+    -- Create ASS content using assdraw
+    local ass = assdraw.ass_new()
+
+    -- Base font size for toast
+    local base_font_size = math.max(16, screen_height / 50)
+
+    -- Calculate toast dimensions based on message length
+    local message_length = string.len(message)
+    local char_width = base_font_size * 0.6
+    local line_height = base_font_size * 1.2
+
+    -- Toast sizing
+    local horizontal_padding = char_width * 1.5
+    local vertical_padding = base_font_size * 0.4
+
+    -- Calculate toast dimensions
+    local toast_width = message_length * char_width + (horizontal_padding * 2)
+    local toast_height = line_height + (vertical_padding * 2)
+
+    -- Position toast at top-left of screen with minimal elegant margin
+    local toast_x = screen_width * 0.008  -- 0.8% from left edge
+    local toast_y = screen_height * 0.015  -- 1.5% from top edge
+
+    -- Draw background box (no rounded corners)
+    ass:new_event()
+    ass:pos(toast_x, toast_y)
+    ass:an(7)
+    ass:append("{\\bord0\\shad0\\c&H000000&\\alpha&H15&}")  -- Slightly transparent background
+    ass:draw_start()
+    ass:rect_cw(0, 0, toast_width, toast_height)
+    ass:draw_stop()
+
+    -- Text content
+    ass:new_event()
+    ass:pos(toast_x + horizontal_padding, toast_y + vertical_padding)
+    ass:an(7)  -- Top-left alignment
+    ass:append("{\\fs" .. base_font_size .. "\\fn@monospace\\c&HFFFFFF&\\bord0\\shad0\\q2}")
+    ass:append(message)
+
+    -- Update overlay
+    toast_overlay.data = ass.text
+    toast_overlay.res_x = screen_width
+    toast_overlay.res_y = screen_height
+    toast_overlay:update()
+
+    -- Auto-hide after duration
+    mp.add_timeout(duration, function()
+        if toast_overlay then
+            toast_overlay.data = ""
+            toast_overlay:update()
+        end
+    end)
+end
 
 local function show_stats_dialog(content)
     -- Create overlay if it doesn't exist
@@ -488,7 +554,7 @@ local function get_user_stats()
             show_stats_dialog(formatted_stats)
             stats_visible = true
         else
-            mp.osd_message("❌ Failed to get user stats: " .. (error_msg or "unknown error"), 5)
+            show_toast("❌ Failed to get user stats: " .. (error_msg or "unknown error"), 5)
             mp.msg.warn("❌ [yas] Failed to get user stats: " .. (error_msg or "unknown error"))
         end
         return
@@ -540,7 +606,7 @@ end
 -- Submit segment to SponsorBlock API
 local function submit_segment(start_time, end_time, category)
     if not youtube_id then
-        mp.osd_message("❌ No YouTube video detected", 3)
+        show_toast("❌ No YouTube video detected", 3)
         return
     end
 
@@ -579,13 +645,13 @@ local function submit_segment(start_time, end_time, category)
     local data, error_msg = http_request(endpoints.submit_segments, "POST", nil, json_string)
 
     if data then
-        mp.osd_message("✅ Segment submitted successfully", 3)
+        show_toast("✅ Segment submitted successfully", 3)
         mp.msg.info("✅ [yas] Segment submitted successfully")
         mp.msg.info("📊 [yas] Response: " .. utils.to_string(data))
         -- Refresh segments to include our submission
         get_segments()
     else
-        mp.osd_message("❌ Failed to submit segment: " .. (error_msg or "unknown error"), 5)
+        show_toast("❌ Failed to submit segment: " .. (error_msg or "unknown error"), 5)
         mp.msg.warn("❌ [yas] Failed to submit segment: " .. (error_msg or "unknown error"))
     end
 end
@@ -628,7 +694,7 @@ local function show_segment_dialog(start_time, end_time)
         hide_stats_dialog()
         segment_dialog_visible = false
         cleanup_bindings()
-        mp.osd_message("Segment submission cancelled", 2)
+        show_toast("Segment submission cancelled", 2)
     end
 
     -- Function to move selection up
@@ -685,13 +751,13 @@ local function toggle_segment_marking()
     end
 
     if not youtube_id then
-        mp.osd_message("❌ SponsorBlock: YouTube video required", 3)
+        show_toast("❌ SponsorBlock: YouTube video required", 3)
         return
     end
 
     local current_time = mp.get_property_number("time-pos")
     if not current_time then
-        mp.osd_message("❌ Could not get current time", 3)
+        show_toast("❌ Could not get current time", 3)
         return
     end
 
@@ -699,23 +765,23 @@ local function toggle_segment_marking()
         -- Start marking
         segment_start_time = current_time
         marking_segment = true
-        mp.osd_message(string.format("📍 Segment start marked at %.1f seconds", current_time), 3)
+        show_toast(string.format("📍 Segment start marked at %.1f seconds", current_time), 3)
         mp.msg.info(string.format("📍 [yas] Segment start marked at %.1f seconds", current_time))
     else
         -- End marking and show dialog
         if current_time <= segment_start_time then
-            mp.osd_message("❌ End time must be after start time", 3)
+            show_toast("❌ End time must be after start time", 3)
             return
         end
 
         local duration = current_time - segment_start_time
         if duration < 0.5 then
-            mp.osd_message("❌ Segment too short (minimum 0.5 seconds)", 3)
+            show_toast("❌ Segment too short (minimum 0.5 seconds)", 3)
             return
         end
 
         marking_segment = false
-        mp.osd_message(string.format("🏁 Segment marked: %.1f - %.1f seconds", segment_start_time, current_time), 3)
+        show_toast(string.format("🏁 Segment marked: %.1f - %.1f seconds", segment_start_time, current_time), 3)
         mp.msg.info(string.format("🏁 [yas] Segment marked: %.1f - %.1f seconds", segment_start_time, current_time))
 
         show_segment_dialog(segment_start_time, current_time)
@@ -727,7 +793,7 @@ local function cancel_segment_marking()
     if marking_segment then
         marking_segment = false
         segment_start_time = nil
-        mp.osd_message("❌ Segment marking cancelled", 2)
+        show_toast("❌ Segment marking cancelled", 2)
         mp.msg.info("❌ [yas] Segment marking cancelled")
     end
 end
