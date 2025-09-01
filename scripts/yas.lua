@@ -381,7 +381,7 @@ local function show_stats_dialog(content)
     ass:new_event()
     ass:pos(box_x + horizontal_padding / 2, box_y + vertical_padding / 2)  -- Position text with half the padding from edges
     ass:an(7)  -- Top-left alignment
-    ass:append("{\\fs" .. base_font_size .. "\\fn" .. "Courier New" .. "\\c&HFFFFFF&\\bord1\\3c&H000000&\\q2}")
+    ass:append("{\\fs" .. base_font_size .. "\\fnmonospace\\c&HFFFFFF&\\bord1\\3c&H000000&\\q2}")
     ass:append(content:gsub("\n", "\\N"))
 
     -- Update overlay with calculated dimensions
