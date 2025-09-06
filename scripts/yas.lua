@@ -376,7 +376,7 @@ function show_toast(message, duration)
     ass:new_event()
     ass:pos(toast_x + horizontal_padding, toast_y + vertical_padding)
     ass:an(7)  -- Top-left alignment
-    ass:append("{\\fs" .. base_font_size .. "\\fn@monospace\\c&HFFFFFF&\\bord0\\shad0\\q2}")
+    ass:append("{\\fs" .. base_font_size .. "\\fnJetBrains Mono\\c&HFFFFFF&\\bord0\\shad0\\q2}")
     ass:append(message)
 
     -- Update overlay
@@ -436,41 +436,24 @@ local function show_stats_dialog(content)
         end
     end
 
-    -- More precise character width calculation (modernz-inspired)
-    -- Detect content type for appropriate sizing
-    local is_stats_dialog = string.find(content, "SponsorBlock user stats") or string.find(content, "Overall Statistics")
+    -- Simple, optimized sizing for JetBrains Mono Regular
     local is_category_dialog = string.find(content, "Submit Segment") or string.find(content, "Select category")
 
-    local char_width_ratio, vertical_padding_ratio, horizontal_padding_ratio
+    local char_width, vertical_padding, horizontal_padding
 
     if is_category_dialog then
-        -- Very tight fit for category selection dialog (what you love!)
-        char_width_ratio = 0.58
-        if base_font_size >= 24 then
-            char_width_ratio = 0.56
-        elseif base_font_size <= 16 then
-            char_width_ratio = 0.6
-        end
-        vertical_padding_ratio = 0.3
-        horizontal_padding_ratio = 0.5
+        -- Category dialog - tight fit
+        char_width = base_font_size * 0.44
+        vertical_padding = base_font_size * 0.25
+        horizontal_padding = char_width * 0.8  -- Nice left spacing
     else
-        -- More generous fit for stats dialog (longer content)
-        char_width_ratio = 0.62
-        if base_font_size >= 24 then
-            char_width_ratio = 0.6
-        elseif base_font_size <= 16 then
-            char_width_ratio = 0.64
-        end
-        vertical_padding_ratio = 0.4
-        horizontal_padding_ratio = 0.75
+        -- Stats dialog - comfortable fit
+        char_width = base_font_size * 0.47
+        vertical_padding = base_font_size * 0.30
+        horizontal_padding = char_width * 0.85  -- Comfortable spacing
     end
 
-    local char_width = base_font_size * char_width_ratio
-    local line_height = base_font_size * 1.1   -- Consistent tight line height
-
-    -- Adaptive padding based on content type
-    local vertical_padding = base_font_size * vertical_padding_ratio
-    local horizontal_padding = char_width * horizontal_padding_ratio
+    local line_height = base_font_size * 1.1  -- Tight line spacing for JetBrains Mono
 
     -- Calculate precise content-fitted dimensions
     local content_width = max_line_length * char_width
@@ -500,7 +483,7 @@ local function show_stats_dialog(content)
     ass:pos(box_x + horizontal_padding, box_y + vertical_padding)  -- Position with exact padding
     ass:an(7)  -- Top-left alignment
     -- Clean text styling without competing borders/shadows
-    ass:append("{\\fs" .. base_font_size .. "\\fn@monospace\\c&HFFFFFF&\\bord0\\shad0\\q2}")
+    ass:append("{\\fs" .. base_font_size .. "\\fnJetBrains Mono\\c&HFFFFFF&\\bord0\\shad0\\q2}")
     ass:append(content:gsub("\n", "\\N"))
 
     -- Update overlay with calculated dimensions
@@ -593,7 +576,7 @@ local function create_segment_dialog_content(start_time, end_time, selected_inde
     table.insert(lines, "Select category:")
 
     for i, category in ipairs(segment_categories) do
-        local prefix = (selected_index == i) and "> " or "   "
+        local prefix = (selected_index == i) and "► " or "  "
         table.insert(lines, string.format("%s%d. %s", prefix, i, category.name))
     end
 
