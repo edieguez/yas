@@ -27,8 +27,7 @@ if not options.user_id or #options.user_id < 30 then
         user_id = user_id .. string.sub(chars, rand, rand)
     end
     options.user_id = user_id
-    mp.msg.info("🆔 [yas] Generated new local userID for submissions: " .. options.user_id)
-    mp.msg.info("💾 [yas] Add this to your yas.conf file: user_id=" .. options.user_id)
+    mp.msg.info("🆔 Generated new local userID for submissions: " .. options.user_id)
 end
 
 -- Parse categories into API-friendly format once
@@ -44,8 +43,7 @@ end
 local endpoints = {
     skip_segments = ("%s/api/skipSegments"):format(options.server_address),
     viewed_video_sponsor_time = ("%s/api/viewedVideoSponsorTime"):format(options.server_address),
-    user_stats = ("%s/api/userStats"):format(options.server_address),
-    submit_segments = ("%s/api/skipSegments"):format(options.server_address)
+    user_stats = ("%s/api/userStats"):format(options.server_address)
 }
 
 -- State variables
@@ -90,7 +88,7 @@ local function http_request(url, method, query_params, json_body)
         end
     end
 
-    mp.msg.debug("🐚 [yas] curl command: " .. table.concat(curl_cmd, " "))
+    mp.msg.debug("🐚 curl command: " .. table.concat(curl_cmd, " "))
 
     local result = mp.command_native{
         name = "subprocess",
@@ -101,31 +99,31 @@ local function http_request(url, method, query_params, json_body)
 
     -- Centralized error handling
     if not result then
-        mp.msg.warn("❌ [yas] HTTP request failed: no result from curl")
+        mp.msg.warn("❌ HTTP request failed: no result from curl")
         return nil, "No result from curl"
     end
 
     if result.status ~= 0 then
-        mp.msg.warn("❌ [yas] HTTP request failed: curl status " .. tostring(result.status))
+        mp.msg.warn("❌ HTTP request failed: curl status " .. tostring(result.status))
         return nil, "Curl failed with status " .. tostring(result.status)
     end
 
     if not result.stdout or result.stdout == "" then
-        mp.msg.warn("❌ [yas] HTTP request failed: empty response")
+        mp.msg.warn("❌ HTTP request failed: empty response")
         return nil, "Empty response"
     end
 
     if result.stdout == "Not Found" then
-        mp.msg.warn("🚫 [yas] HTTP request failed: 404 Not Found")
+        mp.msg.warn("🚫 HTTP request failed: 404 Not Found")
         return nil, "404 Not Found"
     end
 
     -- Try to parse JSON if response looks like JSON
     local data = nil
-    if result.stdout:match("^%s*[%[%{]") then
+    if result.stdout:match("^%s*[%[%{]") then -- Check if starts with [ or {
         data = utils.parse_json(result.stdout)
         if not data then
-            mp.msg.warn("❌ [yas] HTTP request failed: invalid JSON response")
+            mp.msg.warn("❌ HTTP request failed: invalid JSON response")
             return nil, "Invalid JSON response"
         end
     else
@@ -133,7 +131,7 @@ local function http_request(url, method, query_params, json_body)
         data = result.stdout
     end
 
-    mp.msg.debug("✅ [yas] HTTP request succeeded")
+    mp.msg.debug("✅ HTTP request succeeded")
     return data, nil
 end
 
@@ -149,31 +147,31 @@ local function detect_youtube_id()
         "/embed/([%w-_]+).*",
         "-([%w-_]+)%." -- fallback
     }
-    mp.msg.debug("🔎 [yas] Detecting YouTube ID from path: " .. video_path)
+    mp.msg.debug("🔎 Detecting YouTube ID from path: " .. video_path)
     for _, url in ipairs(urls) do
         local candidate = string.match(video_path, url) or string.match(video_referer, url) or string.match(purl, url)
         if candidate and #candidate >= 11 then
-            mp.msg.info("🆔 [yas] YouTube ID detected: " .. string.sub(candidate, 1, 11))
+            mp.msg.info("🆔 YouTube ID detected: " .. string.sub(candidate, 1, 11))
             return string.sub(candidate, 1, 11)
         end
     end
-    mp.msg.warn("⚠️ [yas] No YouTube ID detected")
+    mp.msg.warn("⚠️ No YouTube ID detected")
     return nil
 end
 
 -- Fetch sponsorblock segments from API
 local function get_segments()
     if not youtube_id then
-        mp.msg.warn("⚠️ [yas] No YouTube ID, cannot fetch segments")
+        mp.msg.warn("⚠️ No YouTube ID, cannot fetch segments")
         return
     end
-    mp.msg.info("🌐 [yas] Fetching SponsorBlock segments for video: " .. youtube_id)
+    mp.msg.info("🌐 Fetching SponsorBlock segments for video: " .. youtube_id)
     local data, error_msg = http_request(endpoints.skip_segments, "GET", {
         categories = ("[%s]"):format(options.categories),
         videoID = youtube_id
     })
     if not data then
-        mp.msg.warn("❌ [yas] SponsorBlock API request failed: " .. (error_msg or "unknown error"))
+        mp.msg.warn("❌ SponsorBlock API request failed: " .. (error_msg or "unknown error"))
         return
     end
     segments = {}
@@ -194,20 +192,16 @@ local function get_segments()
         end
     end
     if #segments > 0 then
-        mp.msg.info(("✅ [yas] SponsorBlock: %d segments found"):format(#segments))
+        mp.msg.info(("✅ SponsorBlock: %d segments found"):format(#segments))
         create_chapters()
         mp.observe_property("time-pos", "native", skip_ads)
     else
-        mp.msg.info("ℹ️ [yas] SponsorBlock: no segments found")
+        mp.msg.info("ℹ️ SponsorBlock: no segments found")
     end
 end
 
 -- Create chapters in MPV UI
 function create_chapters()
-    if not segments then
-        mp.msg.debug("ℹ️ [yas] No segments to create chapters for")
-        return
-    end
     local chapters = mp.get_property_native("chapter-list") or {}
     local duration = mp.get_property_native("duration")
     for _, segment in ipairs(segments) do
@@ -222,18 +216,17 @@ function create_chapters()
     end
     table.sort(chapters, function(a, b) return a.time < b.time end)
     mp.set_property_native("chapter-list", chapters)
-    mp.msg.debug("📚 [yas] Updated chapter-list: " .. utils.to_string(chapters))
+    mp.msg.debug("📚 Updated chapter-list: " .. utils.to_string(chapters))
 end
 
 local function report_skip(segment)
     if not segment or segment.skip_reported then return end
-    mp.msg.debug("📤 [yas] Reporting skip for segment " .. segment.short_uuid)
     local data, error_msg = http_request(("%s?UUID=%s"):format(endpoints.viewed_video_sponsor_time, segment.uuid), "POST")
     if data then
-        mp.msg.info("✅ [yas] Reported skip for segment " .. segment.short_uuid)
+        mp.msg.info("✅ Reported skip for segment " .. segment.short_uuid)
         segment.skip_reported = true
     else
-        mp.msg.warn("❌ [yas] Failed to report skip for segment " .. segment.short_uuid .. ": " .. (error_msg or "unknown error"))
+        mp.msg.warn("❌ Failed to report skip for segment " .. segment.short_uuid .. ": " .. (error_msg or "unknown error"))
     end
 end
 
@@ -242,8 +235,8 @@ function skip_ads(_, pos)
     if not pos or not segments then return end
     for _, segment in ipairs(segments) do
         if pos >= segment.start_time and pos < segment.end_time then
-            show_toast(("[sponsorblock] Skipped %s (%.1fs)"):format(segment.category, segment.end_time - segment.start_time), 3)
-            mp.msg.info(("⏭️ [yas] Skipping segment: %s [%s - %s]"):format(segment.category, segment.start_time, segment.end_time))
+            show_toast(("[SponsorBlock] Skipped %s (%.1fs)"):format(segment.category, segment.end_time - segment.start_time), 3)
+            mp.msg.info(("⏭️ Skipping segment: %s [%s - %s]"):format(segment.category, segment.start_time, segment.end_time))
             mp.set_property("time-pos", segment.end_time + 0.001)
             report_skip(segment)
             return
@@ -507,7 +500,7 @@ local function get_user_stats()
     if stats_visible then
         hide_stats_dialog()
         stats_visible = false
-        mp.msg.info("📊 [yas] User stats dialog closed")
+        mp.msg.debug("📊 User stats dialog closed")
         return
     end
 
@@ -515,7 +508,7 @@ local function get_user_stats()
 
     -- Check if we have cached data that's still valid (within 5 minutes)
     if cached_user_stats and (current_time - last_stats_fetch_time) < stats_cache_duration then
-        mp.msg.info("📊 [yas] Using cached user stats (fetched " .. (current_time - last_stats_fetch_time) .. "s ago)")
+        mp.msg.debug("📊 Using cached user stats (fetched " .. (current_time - last_stats_fetch_time) .. "s ago)")
         local formatted_stats = format_user_stats(cached_user_stats)
         show_stats_dialog(formatted_stats)
         stats_visible = true
@@ -523,7 +516,7 @@ local function get_user_stats()
     end
 
     -- Need to fetch new data (either no cache or cache expired)
-    mp.msg.info("🌐 [yas] Fetching user stats for userID: " .. options.user_id)
+    mp.msg.info("🌐 Fetching user stats for userID: " .. options.user_id)
     local data, error_msg = http_request(endpoints.user_stats, "GET", {
         userID = options.user_id,
         fetchCategoryStats = true,
@@ -532,13 +525,13 @@ local function get_user_stats()
     if not data then
         -- If fetch fails but we have cached data, use it anyway
         if cached_user_stats then
-            mp.msg.warn("⚠️ [yas] Failed to fetch fresh stats, using cached data: " .. (error_msg or "unknown error"))
+            mp.msg.warn("⚠️ Failed to fetch fresh stats, using cached data: " .. (error_msg or "unknown error"))
             local formatted_stats = format_user_stats(cached_user_stats)
             show_stats_dialog(formatted_stats)
             stats_visible = true
         else
-            show_toast("❌ Failed to get user stats: " .. (error_msg or "unknown error"), 5)
-            mp.msg.warn("❌ [yas] Failed to get user stats: " .. (error_msg or "unknown error"))
+            show_toast("Failed to get user stats: " .. (error_msg or "unknown error"), 5)
+            mp.msg.warn("❌ Failed to get user stats: " .. (error_msg or "unknown error"))
         end
         return
     end
@@ -546,12 +539,12 @@ local function get_user_stats()
     -- Successfully fetched new data - update cache
     cached_user_stats = data
     last_stats_fetch_time = current_time
-    mp.msg.info("📊 [yas] User stats fetched and cached")
+    mp.msg.info("📊 User stats fetched and cached")
 
     local formatted_stats = format_user_stats(data)
     show_stats_dialog(formatted_stats)
     stats_visible = true
-    mp.msg.info("📊 [yas] User stats dialog displayed")
+    mp.msg.debug("📊 User stats dialog displayed")
 end
 
 -- Segment Categories for submission dialog
@@ -589,12 +582,12 @@ end
 -- Submit segment to SponsorBlock API
 local function submit_segment(start_time, end_time, category)
     if not youtube_id then
-        show_toast("❌ No YouTube video detected", 3)
+        show_toast("No YouTube video detected", 3)
         return
     end
 
-    mp.msg.info(string.format("📤 [yas] Submitting %s segment: %.1f - %.1f", category, start_time, end_time))
-    mp.msg.debug(string.format("🔑 [yas] Using userID: %s", options.user_id))
+    mp.msg.info(string.format("📤 Submitting %s segment: %.1f - %.1f", category, start_time, end_time))
+    mp.msg.debug(string.format("🔑 Using userID: %s", options.user_id))
 
     -- Get video duration for submission
     local video_duration = mp.get_property_number("duration") or 0
@@ -621,21 +614,18 @@ local function submit_segment(start_time, end_time, category)
     -- Convert to JSON string
     local json_string = utils.format_json(json_payload)
 
-    mp.msg.debug("📋 [yas] JSON payload for SponsorBlock submission:")
-    mp.msg.debug(json_string)
-
     -- Make the request using JSON body
-    local data, error_msg = http_request(endpoints.submit_segments, "POST", nil, json_string)
+    local data, error_msg = http_request(endpoints.skip_segments, "POST", nil, json_string)
 
     if data then
-        show_toast("✅ Segment submitted successfully", 3)
-        mp.msg.info("✅ [yas] Segment submitted successfully")
-        mp.msg.info("📊 [yas] Response: " .. utils.to_string(data))
+        show_toast("Segment submitted successfully", 3)
+        mp.msg.info("✅ Segment submitted successfully")
+        mp.msg.info("📊 Response: " .. utils.to_string(data))
         -- Refresh segments to include our submission
         get_segments()
     else
-        show_toast("❌ Failed to submit segment: " .. (error_msg or "unknown error"), 5)
-        mp.msg.warn("❌ [yas] Failed to submit segment: " .. (error_msg or "unknown error"))
+        show_toast("Failed to submit segment: " .. (error_msg or "unknown error"), 5)
+        mp.msg.warn("❌ Failed to submit segment: " .. (error_msg or "unknown error"))
     end
 end
 
@@ -734,13 +724,13 @@ local function toggle_segment_marking()
     end
 
     if not youtube_id then
-        show_toast("❌ SponsorBlock: YouTube video required", 3)
+        show_toast("SponsorBlock: YouTube video required", 3)
         return
     end
 
     local current_time = mp.get_property_number("time-pos")
     if not current_time then
-        show_toast("❌ Could not get current time", 3)
+        show_toast("Could not get current time", 3)
         return
     end
 
@@ -748,24 +738,24 @@ local function toggle_segment_marking()
         -- Start marking
         segment_start_time = current_time
         marking_segment = true
-        show_toast(string.format("📍 Segment start marked at %.1f seconds", current_time), 3)
-        mp.msg.info(string.format("📍 [yas] Segment start marked at %.1f seconds", current_time))
+        show_toast(string.format("Segment start marked at %.1f seconds", current_time), 3)
+        mp.msg.info(string.format("📍 Segment start marked at %.1f seconds", current_time))
     else
         -- End marking and show dialog
         if current_time <= segment_start_time then
-            show_toast("❌ End time must be after start time", 3)
+            show_toast("End time must be after start time", 3)
             return
         end
 
         local duration = current_time - segment_start_time
         if duration < 0.5 then
-            show_toast("❌ Segment too short (minimum 0.5 seconds)", 3)
+            show_toast("Segment too short (minimum 0.5 seconds)", 3)
             return
         end
 
         marking_segment = false
-        show_toast(string.format("🏁 Segment marked: %.1f - %.1f seconds", segment_start_time, current_time), 3)
-        mp.msg.info(string.format("🏁 [yas] Segment marked: %.1f - %.1f seconds", segment_start_time, current_time))
+        show_toast(string.format("Segment marked: %.1f - %.1f seconds", segment_start_time, current_time), 3)
+        mp.msg.info(string.format("🏁 Segment marked: %.1f - %.1f seconds", segment_start_time, current_time))
 
         show_segment_dialog(segment_start_time, current_time)
     end
@@ -776,25 +766,26 @@ local function cancel_segment_marking()
     if marking_segment then
         marking_segment = false
         segment_start_time = nil
-        show_toast("❌ Segment marking cancelled", 2)
-        mp.msg.info("❌ [yas] Segment marking cancelled")
+        show_toast("Segment marking cancelled", 2)
+        mp.msg.info("❌ Segment marking cancelled")
     end
 end
 
 -- MPV Events
 local function file_loaded()
-    mp.msg.info("🎬 [yas] File loaded event")
+    mp.msg.info("🎬 File loaded event. Looking for YouTube ID")
     youtube_id = detect_youtube_id()
-    if not youtube_id then
-        mp.msg.warn("⚠️ [yas] No YouTube ID detected on file load")
-        return
+    if youtube_id then
+        get_segments()
+    else
+        mp.msg.warn("⚠️ No YouTube ID detected on file load")
     end
-    get_segments()
+
 end
 
 -- Reset state on end of file
 local function end_file()
-    mp.msg.info("🛑 [yas] End of file event. Resetting state.")
+    mp.msg.debug("🛑 End of file event. Resetting state.")
     segments = nil
     youtube_id = nil
     -- Clear user stats cache when file ends
@@ -812,18 +803,18 @@ end
 
 -- Keybinding to show user stats
 if options.user_id and #options.user_id >= 30 and string.match(options.user_id, "^%w+$") then
-    mp.msg.info(("ℹ️ [yas] Found user_id %s in config"):format(options.user_id))
+    mp.msg.info(("ℹ️ Found user_id %s in config"):format(options.user_id))
     mp.add_key_binding("z", "show_user_stats", get_user_stats)
 
     -- Segment submission keybindings
     mp.add_key_binding(";", "toggle_segment_marking", toggle_segment_marking)
     mp.add_key_binding("ESC", "cancel_segment_marking", cancel_segment_marking)
 
-    mp.msg.info("✅ [yas] Segment submission keybindings enabled:")
+    mp.msg.info("✅ Segment submission keybindings enabled:")
     mp.msg.info("   ; : Start/End segment marking")
     mp.msg.info("   Escape : Cancel segment marking")
 else
-    mp.msg.warn("⚠️ [yas] No valid user_id configured, user stats and segment submission disabled")
+    mp.msg.warn("⚠️ No valid user_id configured, user stats and segment submission disabled")
 end
 
 -- Register events
