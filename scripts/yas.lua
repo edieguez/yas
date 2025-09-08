@@ -3,8 +3,10 @@
 --   https://github.com/po5/mpv_sponsorblock
 --   https://codeberg.org/jouni/mpv_sponsorblock_minimal
 
+-- DEPENDENCIES AND OPTIONS
 local utils = require "mp.utils"
 local mpoptions = require "mp.options"
+local assdraw = require 'mp.assdraw'
 
 -- Default options
 local options = {
@@ -13,6 +15,7 @@ local options = {
     user_id = ""
 }
 
+-- VARIABLES AND STATE
 -- Endpoint variables
 local endpoints = {
     skip_segments = ("%s/api/skipSegments"):format(options.server_address),
@@ -42,6 +45,29 @@ local segment_submission = {
     keybindings_active = false
 }
 
+-- Overlay variables
+local overlays = {
+    stats = nil,
+    toast = nil,
+    current = nil
+}
+
+-- UI state
+local stats_visible = false
+
+-- Segment Categories for submission dialog
+local segment_categories = {
+    {key = "sponsor", name = "Sponsor", desc = "Paid promotion, paid referrals and direct advertisements"},
+    {key = "selfpromo", name = "Unpaid/Self Promotion", desc = "Similar to sponsor but for unpaid content"},
+    {key = "interaction", name = "Interaction Reminder", desc = "Reminders to like, subscribe, follow, etc."},
+    {key = "intro", name = "Intermission/Intro Animation", desc = "Intro sequences, animations, or intermissions"},
+    {key = "outro", name = "Endcards/Credits", desc = "End credits, endcards, or outros"},
+    {key = "preview", name = "Preview/Recap", desc = "Collection of clips showing what's coming up"},
+    {key = "filler", name = "Filler Tangent", desc = "Tangential content that is not required"},
+    {key = "music_offtopic", name = "Non-Music Section", desc = "Only for music videos, covers non-music portions"}
+}
+
+-- INITIALIZATION
 -- Load options from config file: script-opts/yas.conf
 mpoptions.read_options(options, "yas")
 
@@ -69,12 +95,13 @@ do
 
     if options.user_id and #options.user_id == 36 and options.user_id:match("^[%w]+$") then
         state.has_valid_user_id = true
-        mp.msg.info(("ℹ️ Found user_id %s in config"):format(options.user_id))
+        mp.msg.info(("Found user_id %s in config"):format(options.user_id))
         mp.msg.info("   z to show/hide user stats dialog")
         mp.add_key_binding("z", "show_user_stats", get_user_stats)
     end
 end
 
+-- HELPER FUNCTIONS
 function http_request(url, method, query_params, json_body)
     local curl_cmd = { "curl", "--location", "--silent" }
     method = method or "GET"
@@ -173,6 +200,7 @@ function detect_youtube_id()
     return nil
 end
 
+-- CORE SPONSORBLOCK FUNCTIONALITY
 -- Fetch sponsorblock segments from API
 function get_segments()
     if not state.youtube_id then
@@ -331,18 +359,7 @@ function format_user_stats(data)
     return table.concat(lines, "\n")
 end
 
--- Dialog system (modernz-style)
-local assdraw = require 'mp.assdraw'
-
--- Overlay variables
-local overlays = {
-    stats = nil,
-    toast = nil,
-    current = nil
-}
-
-local stats_visible = false
-
+-- UI AND DIALOG SYSTEM
 function show_toast(message, duration)
     duration = duration or 3
 
@@ -514,8 +531,6 @@ function hide_stats_dialog()
     end
 end
 
-local stats_visible = false
-
 function get_user_stats()
     -- If stats are already visible, hide them
     if stats_visible then
@@ -568,18 +583,7 @@ function get_user_stats()
     mp.msg.debug("📊 User stats dialog displayed")
 end
 
--- Segment Categories for submission dialog
-local segment_categories = {
-    {key = "sponsor", name = "Sponsor", desc = "Paid promotion, paid referrals and direct advertisements"},
-    {key = "selfpromo", name = "Unpaid/Self Promotion", desc = "Similar to sponsor but for unpaid content"},
-    {key = "interaction", name = "Interaction Reminder", desc = "Reminders to like, subscribe, follow, etc."},
-    {key = "intro", name = "Intermission/Intro Animation", desc = "Intro sequences, animations, or intermissions"},
-    {key = "outro", name = "Endcards/Credits", desc = "End credits, endcards, or outros"},
-    {key = "preview", name = "Preview/Recap", desc = "Collection of clips showing what's coming up"},
-    {key = "filler", name = "Filler Tangent", desc = "Tangential content that is not required"},
-    {key = "music_offtopic", name = "Non-Music Section", desc = "Only for music videos, covers non-music portions"}
-}
-
+-- SEGMENT SUBMISSION SYSTEM
 -- Create segment submission dialog content
 function create_segment_dialog_content(start_time, end_time, selected_index)
     selected_index = selected_index or 1
@@ -782,15 +786,7 @@ function toggle_segment_marking()
     end
 end
 
--- Overlay variables
-local overlays = {
-    stats = nil,
-    toast = nil,
-    current = nil
-}
-
--- Segment submission keybinding management (now moved to segment_submission table)
-
+-- KEYBINDING MANAGEMENT
 function activate_segment_keybindings()
     if segment_submission.keybindings_active then return end
 
@@ -839,6 +835,7 @@ function cancel_segment_marking()
     end
 end
 
+-- MPV EVENTS
 -- MPV Events
 function file_loaded()
     mp.msg.info("🎬 File loaded event. Looking for YouTube ID")
