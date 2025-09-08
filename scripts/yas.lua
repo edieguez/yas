@@ -13,6 +13,35 @@ local options = {
     user_id = ""
 }
 
+-- Endpoint variables
+local endpoints = {
+    skip_segments = ("%s/api/skipSegments"):format(options.server_address),
+    viewed_video_sponsor_time = ("%s/api/viewedVideoSponsorTime"):format(options.server_address),
+    user_stats = ("%s/api/userStats"):format(options.server_address)
+}
+
+-- State variables
+local state = {
+    segments = nil,
+    youtube_id = nil,
+    has_valid_user_id = false
+}
+
+-- User stats caching variables
+local user_stats_cache = {
+    cached_data = nil,
+    last_fetch_time = 0,
+    cache_duration = 300 -- 5 minutes in seconds
+}
+
+-- Segment submission variables
+local segment_submission = {
+    marking_segment = false,
+    start_time = nil,
+    dialog_visible = false,
+    keybindings_active = false
+}
+
 -- Load options from config file: script-opts/yas.conf
 mpoptions.read_options(options, "yas")
 
@@ -37,31 +66,16 @@ do
         table.insert(cats, '"' .. category .. '"')
     end
     options.categories = table.concat(cats, ",")
+
+    if options.user_id and #options.user_id == 36 and options.user_id:match("^[%w]+$") then
+        state.has_valid_user_id = true
+        mp.msg.info(("ℹ️ Found user_id %s in config"):format(options.user_id))
+        mp.msg.info("   z to show/hide user stats dialog")
+        mp.add_key_binding("z", "show_user_stats", get_user_stats)
+    end
 end
 
--- Endpoint variables
-local endpoints = {
-    skip_segments = ("%s/api/skipSegments"):format(options.server_address),
-    viewed_video_sponsor_time = ("%s/api/viewedVideoSponsorTime"):format(options.server_address),
-    user_stats = ("%s/api/userStats"):format(options.server_address)
-}
-
--- State variables
-local segments = nil
-local youtube_id = nil
-
--- User stats caching variables
-local cached_user_stats = nil
-local last_stats_fetch_time = 0
-local stats_cache_duration = 300 -- 5 minutes in seconds
-
--- Segment submission variables
-local marking_segment = false
-local segment_start_time = nil
-local current_overlay = nil
-local segment_dialog_visible = false
-
-local function http_request(url, method, query_params, json_body)
+function http_request(url, method, query_params, json_body)
     local curl_cmd = { "curl", "--location", "--silent" }
     method = method or "GET"
 
@@ -136,7 +150,7 @@ local function http_request(url, method, query_params, json_body)
 end
 
 -- Detect YouTube video ID from multiple sources
-local function detect_youtube_id()
+function detect_youtube_id()
     local video_path = mp.get_property("path", "")
     local video_referer = string.match(mp.get_property("http-header-fields", ""), "Referer:([^,]+)") or ""
     local purl = mp.get_property("metadata/by-key/PURL", "")
@@ -160,26 +174,26 @@ local function detect_youtube_id()
 end
 
 -- Fetch sponsorblock segments from API
-local function get_segments()
-    if not youtube_id then
+function get_segments()
+    if not state.youtube_id then
         mp.msg.warn("⚠️ No YouTube ID, cannot fetch segments")
         return
     end
-    mp.msg.info("🌐 Fetching SponsorBlock segments for video: " .. youtube_id)
+    mp.msg.info("🌐 Fetching SponsorBlock segments for video: " .. state.youtube_id)
     local data, error_msg = http_request(endpoints.skip_segments, "GET", {
         categories = ("[%s]"):format(options.categories),
-        videoID = youtube_id
+        videoID = state.youtube_id
     })
     if not data then
         mp.msg.warn("❌ SponsorBlock API request failed: " .. (error_msg or "unknown error"))
         return
     end
-    segments = {}
+    state.segments = {}
     for _, seg in ipairs(data) do
         if seg.segment and #seg.segment == 2 then
             local start_time, end_time = tonumber(seg.segment[1]), tonumber(seg.segment[2])
             if start_time and end_time and end_time > start_time then
-                table.insert(segments, {
+                table.insert(state.segments, {
                     uuid = seg.UUID,
                     short_uuid = string.sub(seg.UUID, 1, 6),
                     category = seg.category,
@@ -191,8 +205,8 @@ local function get_segments()
             end
         end
     end
-    if #segments > 0 then
-        mp.msg.info(("✅ SponsorBlock: %d segments found"):format(#segments))
+    if #state.segments > 0 then
+        mp.msg.info(("✅ SponsorBlock: %d segments found"):format(#state.segments))
         create_chapters()
         mp.observe_property("time-pos", "native", skip_ads)
     else
@@ -204,7 +218,7 @@ end
 function create_chapters()
     local chapters = mp.get_property_native("chapter-list") or {}
     local duration = mp.get_property_native("duration")
-    for _, segment in ipairs(segments) do
+    for _, segment in ipairs(state.segments) do
         table.insert(chapters, {
             title = segment.category:gsub("^%l", string.upper):gsub("_", " ") .. " (" .. segment.short_uuid .. ")",
             time = (not duration or duration > segment.start_time) and segment.start_time or duration - 0.001
@@ -219,7 +233,7 @@ function create_chapters()
     mp.msg.debug("📚 Updated chapter-list: " .. utils.to_string(chapters))
 end
 
-local function report_skip(segment)
+function report_skip(segment)
     if not segment or segment.skip_reported then return end
     local data, error_msg = http_request(("%s?UUID=%s"):format(endpoints.viewed_video_sponsor_time, segment.uuid), "POST")
     if data then
@@ -232,8 +246,8 @@ end
 
 -- Skip segments automatically
 function skip_ads(_, pos)
-    if not pos or not segments then return end
-    for _, segment in ipairs(segments) do
+    if not pos or not state.segments then return end
+    for _, segment in ipairs(state.segments) do
         if pos >= segment.start_time and pos < segment.end_time then
             show_toast(("[SponsorBlock] Skipped %s (%.1fs)"):format(segment.category, segment.end_time - segment.start_time), 3)
             mp.msg.info(("⏭️ Skipping segment: %s [%s - %s]"):format(segment.category, segment.start_time, segment.end_time))
@@ -244,7 +258,7 @@ function skip_ads(_, pos)
     end
 end
 
-local function format_user_stats(data)
+function format_user_stats(data)
     if not data then return "No user stats available" end
 
     local lines = {}
@@ -319,15 +333,22 @@ end
 
 -- Dialog system (modernz-style)
 local assdraw = require 'mp.assdraw'
-local stats_overlay = nil
-local toast_overlay = nil
+
+-- Overlay variables
+local overlays = {
+    stats = nil,
+    toast = nil,
+    current = nil
+}
+
+local stats_visible = false
 
 function show_toast(message, duration)
     duration = duration or 3
 
     -- Create toast overlay if it doesn't exist
-    if not toast_overlay then
-        toast_overlay = mp.create_osd_overlay("ass-events")
+    if not overlays.toast then
+        overlays.toast = mp.create_osd_overlay("ass-events")
     end
 
     -- Get screen dimensions
@@ -373,24 +394,24 @@ function show_toast(message, duration)
     ass:append(message)
 
     -- Update overlay
-    toast_overlay.data = ass.text
-    toast_overlay.res_x = screen_width
-    toast_overlay.res_y = screen_height
-    toast_overlay:update()
+    overlays.toast.data = ass.text
+    overlays.toast.res_x = screen_width
+    overlays.toast.res_y = screen_height
+    overlays.toast:update()
 
     -- Auto-hide after duration
     mp.add_timeout(duration, function()
-        if toast_overlay then
-            toast_overlay.data = ""
-            toast_overlay:update()
+        if overlays.toast then
+            overlays.toast.data = ""
+            overlays.toast:update()
         end
     end)
 end
 
-local function show_stats_dialog(content)
+function show_stats_dialog(content)
     -- Create overlay if it doesn't exist
-    if not stats_overlay then
-        stats_overlay = mp.create_osd_overlay("ass-events")
+    if not overlays.stats then
+        overlays.stats = mp.create_osd_overlay("ass-events")
     end
 
     -- Get screen dimensions
@@ -480,22 +501,22 @@ local function show_stats_dialog(content)
     ass:append(content:gsub("\n", "\\N"))
 
     -- Update overlay with calculated dimensions
-    stats_overlay.data = ass.text
-    stats_overlay.res_x = screen_width
-    stats_overlay.res_y = screen_height
-    stats_overlay:update()
+    overlays.stats.data = ass.text
+    overlays.stats.res_x = screen_width
+    overlays.stats.res_y = screen_height
+    overlays.stats:update()
 end
 
-local function hide_stats_dialog()
-    if stats_overlay then
-        stats_overlay.data = ""
-        stats_overlay:update()
+function hide_stats_dialog()
+    if overlays.stats then
+        overlays.stats.data = ""
+        overlays.stats:update()
     end
 end
 
 local stats_visible = false
 
-local function get_user_stats()
+function get_user_stats()
     -- If stats are already visible, hide them
     if stats_visible then
         hide_stats_dialog()
@@ -507,9 +528,9 @@ local function get_user_stats()
     local current_time = os.time()
 
     -- Check if we have cached data that's still valid (within 5 minutes)
-    if cached_user_stats and (current_time - last_stats_fetch_time) < stats_cache_duration then
-        mp.msg.debug("📊 Using cached user stats (fetched " .. (current_time - last_stats_fetch_time) .. "s ago)")
-        local formatted_stats = format_user_stats(cached_user_stats)
+    if user_stats_cache.cached_data and (current_time - user_stats_cache.last_fetch_time) < user_stats_cache.cache_duration then
+        mp.msg.debug("📊 Using cached user stats (fetched " .. (current_time - user_stats_cache.last_fetch_time) .. "s ago)")
+        local formatted_stats = format_user_stats(user_stats_cache.cached_data)
         show_stats_dialog(formatted_stats)
         stats_visible = true
         return
@@ -524,9 +545,9 @@ local function get_user_stats()
     })
     if not data then
         -- If fetch fails but we have cached data, use it anyway
-        if cached_user_stats then
+        if user_stats_cache.cached_data then
             mp.msg.warn("⚠️ Failed to fetch fresh stats, using cached data: " .. (error_msg or "unknown error"))
-            local formatted_stats = format_user_stats(cached_user_stats)
+            local formatted_stats = format_user_stats(user_stats_cache.cached_data)
             show_stats_dialog(formatted_stats)
             stats_visible = true
         else
@@ -537,8 +558,8 @@ local function get_user_stats()
     end
 
     -- Successfully fetched new data - update cache
-    cached_user_stats = data
-    last_stats_fetch_time = current_time
+    user_stats_cache.cached_data = data
+    user_stats_cache.last_fetch_time = current_time
     mp.msg.info("📊 User stats fetched and cached")
 
     local formatted_stats = format_user_stats(data)
@@ -560,7 +581,7 @@ local segment_categories = {
 }
 
 -- Create segment submission dialog content
-local function create_segment_dialog_content(start_time, end_time, selected_index)
+function create_segment_dialog_content(start_time, end_time, selected_index)
     selected_index = selected_index or 1
     local duration = end_time - start_time
     local lines = {}
@@ -580,8 +601,8 @@ local function create_segment_dialog_content(start_time, end_time, selected_inde
 end
 
 -- Submit segment to SponsorBlock API
-local function submit_segment(start_time, end_time, category)
-    if not youtube_id then
+function submit_segment(start_time, end_time, category)
+    if not state.youtube_id then
         show_toast("No YouTube video detected", 3)
         return
     end
@@ -594,7 +615,7 @@ local function submit_segment(start_time, end_time, category)
 
     -- Create JSON payload in the format you discovered
     local json_payload = {
-        videoID = youtube_id,
+        videoID = state.youtube_id,
         userID = options.user_id,
         segments = {
             {
@@ -630,18 +651,18 @@ local function submit_segment(start_time, end_time, category)
 end
 
 -- Show segment submission dialog
-local function show_segment_dialog(start_time, end_time)
-    segment_dialog_visible = true
+function show_segment_dialog(start_time, end_time)
+    segment_submission.dialog_visible = true
     local selected_index = 1
 
     -- Function to update dialog content with current selection
-    local function update_dialog_content()
+    function update_dialog_content()
         local content = create_segment_dialog_content(start_time, end_time, selected_index)
         show_stats_dialog(content)
     end
 
     -- Function to clean up all key bindings
-    local function cleanup_bindings()
+    function cleanup_bindings()
         mp.remove_key_binding("segment_dialog_up")
         mp.remove_key_binding("segment_dialog_down")
         mp.remove_key_binding("segment_dialog_enter")
@@ -653,9 +674,9 @@ local function show_segment_dialog(start_time, end_time)
     end
 
     -- Function to submit the selected segment
-    local function submit_selected_segment()
+    function submit_selected_segment()
         hide_stats_dialog()
-        segment_dialog_visible = false
+        segment_submission.dialog_visible = false
         cleanup_bindings()
 
         local category = segment_categories[selected_index]
@@ -663,15 +684,15 @@ local function show_segment_dialog(start_time, end_time)
     end
 
     -- Function to cancel dialog
-    local function cancel_dialog()
+    function cancel_dialog()
         hide_stats_dialog()
-        segment_dialog_visible = false
+        segment_submission.dialog_visible = false
         cleanup_bindings()
         show_toast("Segment submission cancelled", 2)
     end
 
     -- Function to move selection up
-    local function move_up()
+    function move_up()
         selected_index = selected_index - 1
         if selected_index < 1 then
             selected_index = #segment_categories
@@ -680,7 +701,7 @@ local function show_segment_dialog(start_time, end_time)
     end
 
     -- Function to move selection down
-    local function move_down()
+    function move_down()
         selected_index = selected_index + 1
         if selected_index > #segment_categories then
             selected_index = 1
@@ -689,7 +710,7 @@ local function show_segment_dialog(start_time, end_time)
     end
 
     -- Function to handle number key selection (for backward compatibility)
-    local function handle_category_key(category_index)
+    function handle_category_key(category_index)
         if category_index >= 1 and category_index <= #segment_categories then
             selected_index = category_index
             update_dialog_content()
@@ -718,12 +739,12 @@ local function show_segment_dialog(start_time, end_time)
 end
 
 -- Toggle segment marking (like SponsorBlock extension)
-local function toggle_segment_marking()
-    if segment_dialog_visible then
+function toggle_segment_marking()
+    if segment_submission.dialog_visible then
         return -- Don't interfere with dialog
     end
 
-    if not youtube_id then
+    if not state.youtube_id then
         show_toast("SponsorBlock: YouTube video required", 3)
         return
     end
@@ -734,87 +755,123 @@ local function toggle_segment_marking()
         return
     end
 
-    if not marking_segment then
+    if not segment_submission.marking_segment then
         -- Start marking
-        segment_start_time = current_time
-        marking_segment = true
+        segment_submission.start_time = current_time
+        segment_submission.marking_segment = true
         show_toast(string.format("Segment start marked at %.1f seconds", current_time), 3)
         mp.msg.info(string.format("📍 Segment start marked at %.1f seconds", current_time))
     else
         -- End marking and show dialog
-        if current_time <= segment_start_time then
+        if current_time <= segment_submission.start_time then
             show_toast("End time must be after start time", 3)
             return
         end
 
-        local duration = current_time - segment_start_time
+        local duration = current_time - segment_submission.start_time
         if duration < 0.5 then
             show_toast("Segment too short (minimum 0.5 seconds)", 3)
             return
         end
 
-        marking_segment = false
-        show_toast(string.format("Segment marked: %.1f - %.1f seconds", segment_start_time, current_time), 3)
-        mp.msg.info(string.format("🏁 Segment marked: %.1f - %.1f seconds", segment_start_time, current_time))
+        segment_submission.marking_segment = false
+        show_toast(string.format("Segment marked: %.1f - %.1f seconds", segment_submission.start_time, current_time), 3)
+        mp.msg.info(string.format("🏁 Segment marked: %.1f - %.1f seconds", segment_submission.start_time, current_time))
 
-        show_segment_dialog(segment_start_time, current_time)
+        show_segment_dialog(segment_submission.start_time, current_time)
+    end
+end
+
+-- Overlay variables
+local overlays = {
+    stats = nil,
+    toast = nil,
+    current = nil
+}
+
+-- Segment submission keybinding management (now moved to segment_submission table)
+
+function activate_segment_keybindings()
+    if segment_submission.keybindings_active then return end
+
+    mp.add_key_binding(";", "toggle_segment_marking", toggle_segment_marking)
+    mp.add_key_binding(":", "cancel_segment_marking", cancel_segment_marking)
+
+    segment_submission.keybindings_active = true
+    mp.msg.info("✅ Segment submission keybindings enabled:")
+    mp.msg.info("   ; to Start/End segment marking")
+    mp.msg.info("   : to Cancel segment marking")
+end
+
+function deactivate_segment_keybindings()
+    if not segment_submission.keybindings_active then return end
+
+    mp.remove_key_binding("toggle_segment_marking")
+    mp.remove_key_binding("cancel_segment_marking")
+
+    segment_submission.keybindings_active = false
+    mp.msg.info("🚫 Segment submission keybindings disabled")
+end
+
+function check_and_update_keybindings()
+    local should_activate = state.has_valid_user_id and state.youtube_id
+
+    if should_activate and not segment_submission.keybindings_active then
+        activate_segment_keybindings()
+    elseif not should_activate and segment_submission.keybindings_active then
+        deactivate_segment_keybindings()
+    end
+
+    if not state.has_valid_user_id then
+        mp.msg.warn("⚠️ No valid user_id configured, segment submission disabled")
+    elseif not state.youtube_id then
+        mp.msg.warn("⚠️ No YouTube video detected, segment submission disabled")
     end
 end
 
 -- Cancel segment marking
-local function cancel_segment_marking()
-    if marking_segment then
-        marking_segment = false
-        segment_start_time = nil
+function cancel_segment_marking()
+    if segment_submission.marking_segment then
+        segment_submission.marking_segment = false
+        segment_submission.start_time = nil
         show_toast("Segment marking cancelled", 2)
         mp.msg.info("❌ Segment marking cancelled")
     end
 end
 
 -- MPV Events
-local function file_loaded()
+function file_loaded()
     mp.msg.info("🎬 File loaded event. Looking for YouTube ID")
-    youtube_id = detect_youtube_id()
-    if youtube_id then
-        get_segments()
-    else
-        mp.msg.warn("⚠️ No YouTube ID detected on file load")
-    end
+    state.youtube_id = detect_youtube_id()
 
+    -- Check and update keybindings based on current state
+    check_and_update_keybindings()
+
+    if state.youtube_id then
+        get_segments()
+    end
 end
 
 -- Reset state on end of file
-local function end_file()
+function end_file()
     mp.msg.debug("🛑 End of file event. Resetting state.")
-    segments = nil
-    youtube_id = nil
-    -- Clear user stats cache when file ends
-    cached_user_stats = nil
-    last_stats_fetch_time = 0
-    -- Reset segment submission state
-    marking_segment = false
-    segment_start_time = nil
-    segment_dialog_visible = false
-    if current_overlay then
+
+    -- Reset state variables
+    state.segments = nil
+    state.youtube_id = nil
+    user_stats_cache.cached_data = nil
+    user_stats_cache.last_fetch_time = 0
+    segment_submission.marking_segment = false
+    segment_submission.start_time = nil
+    segment_submission.dialog_visible = false
+
+    if overlays.current then
         hide_stats_dialog()
     end
     mp.unobserve_property(skip_ads)
-end
 
--- Keybinding to show user stats
-if options.user_id and #options.user_id >= 30 and string.match(options.user_id, "^%w+$") then
-    mp.msg.info(("ℹ️ Found user_id %s in config"):format(options.user_id))
-    mp.add_key_binding("z", "show_user_stats", get_user_stats)
-
-    -- Segment submission keybindings
-    mp.add_key_binding(";", "toggle_segment_marking", toggle_segment_marking)
-    mp.add_key_binding("ESC", "cancel_segment_marking", cancel_segment_marking)
-
-    mp.msg.info("✅ Segment submission keybindings enabled:")
-    mp.msg.info("   ; : Start/End segment marking")
-    mp.msg.info("   Escape : Cancel segment marking")
-else
-    mp.msg.warn("⚠️ No valid user_id configured, user stats and segment submission disabled")
+    -- Deactivate segment submission keybindings
+    deactivate_segment_keybindings()
 end
 
 -- Register events
