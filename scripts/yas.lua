@@ -85,22 +85,6 @@ if not options.user_id or #options.user_id < 30 then
     mp.msg.info("🆔 Generated new local userID for submissions: " .. options.user_id)
 end
 
--- Parse categories into API-friendly format once
-do
-    local cats = {}
-    for category in string.gmatch(options.categories, "([^,]+)") do
-        table.insert(cats, '"' .. category .. '"')
-    end
-    options.categories = table.concat(cats, ",")
-
-    if options.user_id and #options.user_id == 36 and options.user_id:match("^[%w]+$") then
-        state.has_valid_user_id = true
-        mp.msg.info(("Found user_id %s in config"):format(options.user_id))
-        mp.msg.info("   z to show/hide user stats dialog")
-        mp.add_key_binding("z", "show_user_stats", get_user_stats)
-    end
-end
-
 -- HELPER FUNCTIONS
 function http_request(url, method, query_params, json_body)
     local curl_cmd = { "curl", "--location", "--silent" }
@@ -869,6 +853,22 @@ function end_file()
 
     -- Deactivate segment submission keybindings
     deactivate_segment_keybindings()
+end
+
+do
+    -- Parse categories into API-friendly format once
+    local cats = {}
+    for category in string.gmatch(options.categories, "([^,]+)") do
+        table.insert(cats, '"' .. category .. '"')
+    end
+    options.categories = table.concat(cats, ",")
+
+    if options.user_id and #options.user_id == 36 and options.user_id:match("^[%w]+$") then
+        state.has_valid_user_id = true
+        mp.msg.info(("Found user_id %s in config"):format(options.user_id))
+        mp.msg.info("   z to show/hide user stats dialog")
+        mp.add_key_binding("z", "show_user_stats", get_user_stats)
+    end
 end
 
 -- Register events
