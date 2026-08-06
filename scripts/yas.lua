@@ -46,6 +46,10 @@ local segment_submission = {
     keybindings_active = false
 }
 
+-- Set by show_segment_dialog() while its dialog is open, so end_file() can
+-- remove its forced key bindings if the file changes while it's up
+local segment_dialog_cleanup = nil
+
 -- Overlay variables
 local overlays = {
     stats = nil,
@@ -677,7 +681,9 @@ function show_segment_dialog(start_time, end_time)
         for j = 1, #segment_categories do
             mp.remove_key_binding("segment_category_" .. j)
         end
+        segment_dialog_cleanup = nil
     end
+    segment_dialog_cleanup = cleanup_bindings
 
     -- Function to submit the selected segment
     function submit_selected_segment()
@@ -861,13 +867,18 @@ function end_file()
     state.base_chapters = nil
     user_stats_cache.cached_data = nil
     user_stats_cache.last_fetch_time = 0
+
+    -- If the segment submission dialog was open, remove its forced key
+    -- bindings instead of leaving them bound to this video's closures
+    if segment_submission.dialog_visible and segment_dialog_cleanup then
+        segment_dialog_cleanup()
+    end
     segment_submission.marking_segment = false
     segment_submission.start_time = nil
     segment_submission.dialog_visible = false
 
-    if overlays.current then
-        hide_stats_dialog()
-    end
+    hide_stats_dialog()
+    stats_visible = false
     mp.unobserve_property(skip_ads)
 
     -- Deactivate segment submission keybindings
