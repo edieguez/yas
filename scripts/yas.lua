@@ -50,7 +50,7 @@ local segment_submission = {
 local overlays = {
     stats = nil,
     toast = nil,
-    current = nil
+    toast_timer = nil
 }
 
 -- UI state
@@ -413,12 +413,17 @@ function show_toast(message, duration)
     overlays.toast.res_y = screen_height
     overlays.toast:update()
 
-    -- Auto-hide after duration
-    mp.add_timeout(duration, function()
+    -- Auto-hide after duration. Cancel any pending hide from a previous
+    -- toast so it doesn't blank this one out early.
+    if overlays.toast_timer then
+        overlays.toast_timer:kill()
+    end
+    overlays.toast_timer = mp.add_timeout(duration, function()
         if overlays.toast then
             overlays.toast.data = ""
             overlays.toast:update()
         end
+        overlays.toast_timer = nil
     end)
 end
 
