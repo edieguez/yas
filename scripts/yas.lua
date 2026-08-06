@@ -33,7 +33,9 @@ local state = {
     segments = nil,
     youtube_id = nil,
     has_valid_user_id = false,
-    base_chapters = nil -- video's own chapters, captured once, before SponsorBlock ones are added
+    base_chapters = nil, -- video's own chapters, captured once, before SponsorBlock ones are added
+    active_mute_segment = nil, -- the "mute" segment currently muting audio, if any
+    mute_before_segment = false -- mute state to restore once active_mute_segment ends
 }
 
 -- User stats caching variables
@@ -255,7 +257,9 @@ function create_chapters()
     local duration = mp.get_property_native("duration")
     for _, segment in ipairs(state.segments) do
         table.insert(chapters, {
-            title = segment.category:gsub("^%l", string.upper):gsub("_", " ") .. " (" .. segment.short_uuid .. ")",
+            title = segment.category:gsub("^%l", string.upper):gsub("_", " ")
+                .. (segment.action == "mute" and " [Mute]" or "")
+                .. " (" .. segment.short_uuid .. ")",
             time = (not duration or duration > segment.start_time) and segment.start_time or duration - 0.001
         })
         table.insert(chapters, {
@@ -282,12 +286,34 @@ end
 -- Skip segments automatically
 function skip_ads(_, pos)
     if not pos or not state.segments then return end
+
+    -- Leave an active "mute" segment: either playback moved past its end,
+    -- or a manual seek jumped elsewhere while it was muting
+    if state.active_mute_segment then
+        local seg = state.active_mute_segment
+        if pos < seg.start_time or pos >= seg.end_time then
+            mp.set_property_bool("mute", state.mute_before_segment)
+            state.active_mute_segment = nil
+        end
+    end
+
     for _, segment in ipairs(state.segments) do
         if pos >= segment.start_time and pos < segment.end_time then
-            show_toast(("[SponsorBlock] Skipped %s (%.1fs)"):format(segment.category, segment.end_time - segment.start_time), 3)
-            mp.msg.info(("⏭️ Skipping segment: %s [%s - %s]"):format(segment.category, segment.start_time, segment.end_time))
-            mp.set_property("time-pos", segment.end_time + 0.001)
-            report_skip(segment)
+            if segment.action == "mute" then
+                if state.active_mute_segment ~= segment then
+                    state.mute_before_segment = mp.get_property_bool("mute")
+                    mp.set_property_bool("mute", true)
+                    state.active_mute_segment = segment
+                    show_toast(("[SponsorBlock] Muted %s (%.1fs)"):format(segment.category, segment.end_time - segment.start_time), 3)
+                    mp.msg.info(("🔇 Muting segment: %s [%s - %s]"):format(segment.category, segment.start_time, segment.end_time))
+                    report_skip(segment)
+                end
+            else
+                show_toast(("[SponsorBlock] Skipped %s (%.1fs)"):format(segment.category, segment.end_time - segment.start_time), 3)
+                mp.msg.info(("⏭️ Skipping segment: %s [%s - %s]"):format(segment.category, segment.start_time, segment.end_time))
+                mp.set_property("time-pos", segment.end_time + 0.001)
+                report_skip(segment)
+            end
             return
         end
     end
@@ -866,6 +892,13 @@ end
 -- Reset state on end of file
 function end_file()
     mp.msg.debug("🛑 End of file event. Resetting state.")
+
+    -- If a "mute" segment was actively muting audio, restore mute state
+    -- before it (and this video) go away
+    if state.active_mute_segment then
+        mp.set_property_bool("mute", state.mute_before_segment)
+        state.active_mute_segment = nil
+    end
 
     -- Reset state variables
     state.segments = nil
