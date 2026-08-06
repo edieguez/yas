@@ -79,6 +79,58 @@ local segment_categories = {
     {key = "music_offtopic", name = "Non-Music Section", desc = "Only for music videos, covers non-music portions"}
 }
 
+-- Writes a freshly generated user_id back into script-opts/yas.conf so
+-- future launches reuse the same identity instead of mp.options silently
+-- forgetting it and this script minting a new one every session — which
+-- would keep resetting submission history/reputation and always show
+-- near-empty stats.
+local function persist_generated_user_id(user_id)
+    local ok, conf_path = pcall(mp.command_native, {"expand-path", "~~/script-opts/yas.conf"})
+    if not ok or not conf_path or conf_path == "" then
+        mp.msg.warn("⚠️ Could not resolve script-opts/yas.conf path; generated userID won't persist")
+        return
+    end
+
+    -- Drop any existing *active* (uncommented) user_id= line — there
+    -- shouldn't be a valid one, since that's what triggered generating a
+    -- new one, but an empty `user_id=` is possible — then append the new
+    -- one. Filtered line-by-line rather than with a whole-string gsub:
+    -- Lua patterns have no line-start anchor, so a pattern matching
+    -- "user_id=" anywhere would also strip it out of "# user_id=" and
+    -- mangle that comment.
+    local lines = {}
+    local f = io.open(conf_path, "r")
+    if f then
+        for line in f:lines() do
+            if not line:match("^%s*user_id%s*=") then
+                table.insert(lines, line)
+            end
+        end
+        f:close()
+    end
+    table.insert(lines, "user_id=" .. user_id)
+    local updated = table.concat(lines, "\n") .. "\n"
+
+    -- A fresh install may not have a script-opts/ directory yet
+    local conf_dir = conf_path:match("^(.*)[/\\][^/\\]+$")
+    if conf_dir then
+        mp.command_native({
+            name = "subprocess",
+            playback_only = false,
+            args = {"mkdir", "-p", conf_dir}
+        })
+    end
+
+    local out, err = io.open(conf_path, "w")
+    if not out then
+        mp.msg.warn("⚠️ Could not write " .. conf_path .. " to persist generated userID: " .. tostring(err))
+        return
+    end
+    out:write(updated)
+    out:close()
+    mp.msg.info("💾 Saved generated userID to " .. conf_path)
+end
+
 -- INITIALIZATION
 -- Load options from config file: script-opts/yas.conf
 mpoptions.read_options(options, "yas")
@@ -95,6 +147,7 @@ if not options.user_id or #options.user_id < 30 then
     end
     options.user_id = user_id
     mp.msg.info("🆔 Generated new local userID for submissions: " .. options.user_id)
+    persist_generated_user_id(user_id)
 end
 
 -- HELPER FUNCTIONS
