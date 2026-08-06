@@ -220,6 +220,9 @@ function get_segments()
     if #state.segments > 0 then
         mp.msg.info(("✅ SponsorBlock: %d segments found"):format(#state.segments))
         create_chapters()
+        -- Avoid stacking duplicate observers if segments are re-fetched
+        -- mid-video (e.g. after a submission refresh)
+        mp.unobserve_property(skip_ads)
         mp.observe_property("time-pos", "native", skip_ads)
     else
         mp.msg.info("ℹ️ SponsorBlock: no segments found")
