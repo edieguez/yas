@@ -12,6 +12,11 @@ local assdraw = require 'mp.assdraw'
 local options = {
     server_address = "https://sponsor.ajay.app",
     categories = "sponsor,selfpromo,interaction,intro,outro,preview,hook,filler",
+    -- skip = seek past the segment; mute = mute audio for its duration.
+    -- Other SponsorBlock action types (poi, full, chapter) are markers the
+    -- reference extension doesn't auto-apply either, so they're not
+    -- requested here.
+    action_types = "skip,mute",
     user_id = ""
 }
 
@@ -199,6 +204,7 @@ function get_segments()
     mp.msg.info("🌐 Fetching SponsorBlock segments for video: " .. state.youtube_id)
     local data, error_msg = http_request(endpoints.skip_segments, "GET", {
         categories = ("[%s]"):format(options.categories),
+        actionTypes = ("[%s]"):format(options.action_types),
         videoID = state.youtube_id
     })
     if not data then
@@ -214,7 +220,7 @@ function get_segments()
                     uuid = seg.UUID,
                     short_uuid = string.sub(seg.UUID, 1, 6),
                     category = seg.category,
-                    action = seg.action,
+                    action = seg.actionType, -- API field is "actionType", not "action"
                     start_time = start_time,
                     end_time = end_time,
                     skip_reported = false
@@ -886,12 +892,16 @@ function end_file()
 end
 
 do
-    -- Parse categories into API-friendly format once
-    local cats = {}
-    for category in string.gmatch(options.categories, "([^,]+)") do
-        table.insert(cats, '"' .. category .. '"')
+    -- Parse comma-separated option lists into API-friendly JSON array contents once
+    local function to_json_list(csv)
+        local items = {}
+        for item in string.gmatch(csv, "([^,]+)") do
+            table.insert(items, '"' .. item .. '"')
+        end
+        return table.concat(items, ",")
     end
-    options.categories = table.concat(cats, ",")
+    options.categories = to_json_list(options.categories)
+    options.action_types = to_json_list(options.action_types)
 
     if options.user_id and #options.user_id >= 30 and options.user_id:match("^[%w]+$") then
         state.has_valid_user_id = true
