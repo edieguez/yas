@@ -304,12 +304,12 @@ function skip_ads(_, pos)
                     state.mute_before_segment = mp.get_property_bool("mute")
                     mp.set_property_bool("mute", true)
                     state.active_mute_segment = segment
-                    show_toast(("[SponsorBlock] Muted %s (%.1fs)"):format(segment.category, segment.end_time - segment.start_time), 3)
+                    show_toast(("Muted %s (%.1fs)"):format(segment.category, segment.end_time - segment.start_time), "info")
                     mp.msg.info(("🔇 Muting segment: %s [%s - %s]"):format(segment.category, segment.start_time, segment.end_time))
                     report_skip(segment)
                 end
             else
-                show_toast(("[SponsorBlock] Skipped %s (%.1fs)"):format(segment.category, segment.end_time - segment.start_time), 3)
+                show_toast(("Skipped %s (%.1fs)"):format(segment.category, segment.end_time - segment.start_time), "info")
                 mp.msg.info(("⏭️ Skipping segment: %s [%s - %s]"):format(segment.category, segment.start_time, segment.end_time))
                 mp.set_property("time-pos", segment.end_time + 0.001)
                 report_skip(segment)
@@ -319,31 +319,35 @@ function skip_ads(_, pos)
     end
 end
 
+-- Returns a list of rows for show_stats_dialog(): each is either
+-- {text=...} (a plain line) or {label=..., value=...} (a two-column stat,
+-- rendered with the value right-aligned in its own column — text padding
+-- like "%-25s" only lines up in a monospace font, which we no longer use).
 function format_user_stats(data)
-    if not data then return "No user stats available" end
+    if not data then return {{text = "No user stats available"}} end
 
-    local lines = {}
+    local rows = {}
     local username = data.userName or "Unknown User"
-    table.insert(lines, "SponsorBlock user stats for " .. username)
-    table.insert(lines, string.rep("=", 35))
+    table.insert(rows, {text = "SponsorBlock user stats for " .. username})
+    table.insert(rows, {text = ""})
 
     -- Overall stats
     if data.overallStats then
-        table.insert(lines, "Overall Statistics:")
+        table.insert(rows, {text = "Overall Statistics"})
         if data.overallStats.minutesSaved then
             local hours = math.floor(data.overallStats.minutesSaved / 60)
             local minutes = math.floor(data.overallStats.minutesSaved % 60)
-            table.insert(lines, string.format("  %-25s %s", "Time Saved:", hours .. "h " .. minutes .. "m"))
+            table.insert(rows, {label = "Time Saved", value = hours .. "h " .. minutes .. "m"})
         end
         if data.overallStats.segmentCount then
-            table.insert(lines, string.format("  %-25s %s", "Segments Submitted:", data.overallStats.segmentCount))
+            table.insert(rows, {label = "Segments Submitted", value = tostring(data.overallStats.segmentCount)})
         end
     end
 
     -- Category breakdown
     if data.categoryCount then
-        table.insert(lines, "")
-        table.insert(lines, "Segments by Category:")
+        table.insert(rows, {text = ""})
+        table.insert(rows, {text = "Segments by Category"})
         local categories = {
             {key = "sponsor", name = "Sponsor"},
             {key = "intro", name = "Intro"},
@@ -361,15 +365,15 @@ function format_user_stats(data)
         for _, cat in ipairs(categories) do
             local count = data.categoryCount[cat.key]
             if count and count > 0 then
-                table.insert(lines, string.format("  %-25s %s", cat.name .. ":", count))
+                table.insert(rows, {label = cat.name, value = tostring(count)})
             end
         end
     end
 
     -- Action type breakdown
     if data.actionTypeCount then
-        table.insert(lines, "")
-        table.insert(lines, "Segments by Action Type:")
+        table.insert(rows, {text = ""})
+        table.insert(rows, {text = "Segments by Action Type"})
         local actions = {
             {key = "skip", name = "Skip"},
             {key = "mute", name = "Mute"},
@@ -381,79 +385,125 @@ function format_user_stats(data)
         for _, action in ipairs(actions) do
             local count = data.actionTypeCount[action.key]
             if count and count > 0 then
-                table.insert(lines, string.format("  %-25s %s", action.name .. ":", count))
+                table.insert(rows, {label = action.name, value = tostring(count)})
             end
         end
     end
 
-    table.insert(lines, "")
-    table.insert(lines, "Press 'z' to close")
+    table.insert(rows, {text = ""})
+    table.insert(rows, {text = "Press 'z' to close"})
 
-    return table.concat(lines, "\n")
+    return rows
 end
 
 -- UI AND DIALOG SYSTEM
-function show_toast(message, duration)
+-- Styled like playlist_manager.lua: a fixed virtual canvas (res_y=720,
+-- res_x scaled to the display's aspect ratio) so panels are the same
+-- physical size on any screen, real glyph-width measurement via a hidden
+-- compute_bounds overlay instead of guessing per-character width, and no
+-- forced font — text renders in mpv's default OSD font.
+local FONT_SIZE = 24
+local BG_ALPHA  = 0x50 -- background alpha, matches playlist_manager
+local CORNER    = 8
+local PAD       = 10
+local LH        = FONT_SIZE * 1.2
+
+-- Icons are plain glyphs, not emoji — libass/the default OSD font can't
+-- render color emoji reliably, they'd show as tofu boxes.
+local TOAST_STYLE = {
+    info    = {color = "FFFFFF", icon = ""},   -- white
+    success = {color = "44EE44", icon = "✓ "}, -- green
+    error   = {color = "3C3CDC", icon = "✗ "}  -- red (ASS is BGR: this is RGB(220,60,60))
+}
+
+local measure_osd = mp.create_osd_overlay("ass-events")
+measure_osd.hidden = true
+measure_osd.compute_bounds = true
+local text_width_cache = {}
+local text_width_cache_count = 0
+
+-- Virtual canvas width: res_y is fixed at 720, res_x scales with the
+-- display's aspect ratio so pixels stay square on any screen.
+local function get_virt_size()
+    local osd = mp.get_property_native("osd-dimensions") or {}
+    local ar = osd.aspect
+    if not ar or ar <= 0 then
+        ar = (osd.w and osd.h and osd.h > 0) and (osd.w / osd.h) or (16 / 9)
+    end
+    return math.floor(720 * ar), 720
+end
+
+-- Measures the rendered pixel width of `text` at FONT_SIZE on the current
+-- virtual canvas, so panels fit their content exactly.
+local function measure_text(text)
+    if not text or #text == 0 then return 0 end
+    if text_width_cache[text] then return text_width_cache[text] end
+    local w = 0
+    local width, height = get_virt_size()
+    measure_osd.res_x = width
+    measure_osd.res_y = height
+    measure_osd.data = ("{\\fs%d\\bord0\\q2\\an7\\pos(0,0)}"):format(FONT_SIZE) .. text
+    local bounds = measure_osd:update()
+    if bounds and bounds.x0 and bounds.x1 then
+        w = math.max(0, bounds.x1 - bounds.x0)
+    end
+    if w == 0 then w = math.ceil(#text * FONT_SIZE * 0.6) end -- fallback
+    if text_width_cache_count > 200 then
+        text_width_cache = {}
+        text_width_cache_count = 0
+    end
+    text_width_cache[text] = w
+    text_width_cache_count = text_width_cache_count + 1
+    return w
+end
+
+-- kind: "info" (default), "success", or "error" — picks the text color.
+function show_toast(message, kind, duration)
+    kind = kind or "info"
     duration = duration or 3
 
-    -- Create toast overlay if it doesn't exist
     if not overlays.toast then
         overlays.toast = mp.create_osd_overlay("ass-events")
     end
-
-    -- Get screen dimensions
-    local screen_width, screen_height, display_aspect = mp.get_osd_size()
-
-    -- Create ASS content using assdraw
-    local ass = assdraw.ass_new()
-
-    -- Base font size for toast
-    local base_font_size = math.max(16, screen_height / 50)
-
-    -- Calculate toast dimensions based on message length
-    local message_length = string.len(message)
-    local char_width = base_font_size * 0.6
-    local line_height = base_font_size * 1.2
-
-    -- Toast sizing
-    local horizontal_padding = char_width * 1.5
-    local vertical_padding = base_font_size * 0.4
-
-    -- Calculate toast dimensions
-    local toast_width = message_length * char_width + (horizontal_padding * 2)
-    local toast_height = line_height + (vertical_padding * 2)
-
-    -- Position toast at top-left of screen with minimal elegant margin
-    local toast_x = screen_width * 0.008  -- 0.8% from left edge
-    local toast_y = screen_height * 0.015  -- 1.5% from top edge
-
-    -- Draw background box (no rounded corners)
-    ass:new_event()
-    ass:pos(toast_x, toast_y)
-    ass:an(7)
-    ass:append("{\\bord0\\shad0\\c&H000000&\\alpha&H15&}")  -- Slightly transparent background
-    ass:draw_start()
-    ass:rect_cw(0, 0, toast_width, toast_height)
-    ass:draw_stop()
-
-    -- Text content
-    ass:new_event()
-    ass:pos(toast_x + horizontal_padding, toast_y + vertical_padding)
-    ass:an(7)  -- Top-left alignment
-    ass:append("{\\fs" .. base_font_size .. "\\fnJetBrains Mono\\c&HFFFFFF&\\bord0\\shad0\\q2}")
-    ass:append(message)
-
-    -- Update overlay
-    overlays.toast.data = ass.text
-    overlays.toast.res_x = screen_width
-    overlays.toast.res_y = screen_height
-    overlays.toast:update()
-
-    -- Auto-hide after duration. Cancel any pending hide from a previous
-    -- toast so it doesn't blank this one out early.
+    -- Cancel any pending hide from a previous toast so it doesn't blank
+    -- this one out early.
     if overlays.toast_timer then
         overlays.toast_timer:kill()
+        overlays.toast_timer = nil
     end
+
+    local style = TOAST_STYLE[kind] or TOAST_STYLE.info
+    local full = style.icon .. message
+
+    local width, height = get_virt_size()
+    local max_w = width - PAD * 4
+    local cw = math.min(measure_text(full), max_w)
+    local x, y = PAD * 2, PAD * 2
+
+    local ass = assdraw.ass_new()
+
+    ass:new_event()
+    ass:an(7)
+    ass:pos(x, y)
+    ass:append(("{\\bord0\\blur0\\1c&H000000&\\1a&H%02X&\\4a&Hff&}"):format(BG_ALPHA))
+    ass:draw_start()
+    local tpad = PAD / 2
+    ass:round_rect_cw(-PAD, -tpad, cw + PAD, FONT_SIZE + tpad, CORNER, CORNER)
+    ass:draw_stop()
+
+    local clip = ("\\clip(0,0,%d,%d)"):format(math.floor(x + cw), height)
+    ass:new_event()
+    ass:an(4)
+    ass:pos(x, y + FONT_SIZE / 2)
+    ass:append(("{\\bord1\\1c&H%s&\\3c&H000000&\\fs%d\\fsp0\\q2%s}"):format(style.color, FONT_SIZE, clip))
+    ass:append(full)
+
+    overlays.toast.res_x = width
+    overlays.toast.res_y = height
+    overlays.toast.z = 2000
+    overlays.toast.data = ass.text
+    overlays.toast:update()
+
     overlays.toast_timer = mp.add_timeout(duration, function()
         if overlays.toast then
             overlays.toast.data = ""
@@ -463,102 +513,74 @@ function show_toast(message, duration)
     end)
 end
 
-function show_stats_dialog(content)
-    -- Create overlay if it doesn't exist
+-- Renders a centered panel from a list of rows (see format_user_stats()):
+-- plain {text=...} lines, and {label=..., value=...} rows laid out as a
+-- real two-column table — label left-aligned, value right-aligned in its
+-- own column — since character padding only lines up in a monospace font.
+function show_stats_dialog(rows)
     if not overlays.stats then
         overlays.stats = mp.create_osd_overlay("ass-events")
     end
 
-    -- Get screen dimensions
-    local screen_width, screen_height, display_aspect = mp.get_osd_size()
+    local width, height = get_virt_size()
 
-    -- Create ASS content using assdraw
+    local label_w, value_w, plain_w = 0, 0, 0
+    for _, row in ipairs(rows) do
+        if row.label then
+            label_w = math.max(label_w, measure_text(row.label))
+            value_w = math.max(value_w, measure_text(row.value))
+        elseif row.text and row.text ~= "" then
+            plain_w = math.max(plain_w, measure_text(row.text))
+        end
+    end
+    local gap = FONT_SIZE * 1.5
+    local cw = math.max(label_w + gap + value_w, plain_w)
+    cw = math.min(cw, width - PAD * 4)
+
+    local box_w = cw + PAD * 2
+    local box_h = #rows * LH + PAD * 2
+    local x = (width - box_w) / 2
+    local y = (height - box_h) / 2
+
     local ass = assdraw.ass_new()
 
-    -- Calculate content-based dimensions
-    local lines = {}
-    for line in content:gmatch("[^\n]+") do
-        table.insert(lines, line)
-    end
-
-    -- Base font size for calculations
-    local base_font_size = math.max(18, screen_height / 40)
-
-    -- Calculate box dimensions based on content (improved modernz-style approach)
-    local max_line_length = 0
-    for _, line in ipairs(lines) do
-        -- More accurate length calculation - treat Unicode chars more conservatively
-        local display_length = 0
-        for i = 1, string.len(line) do
-            local byte = string.byte(line, i)
-            if byte and byte > 127 then
-                -- Unicode character - slightly wider but not as much
-                display_length = display_length + 1.2
-            else
-                -- ASCII character
-                display_length = display_length + 1
-            end
-        end
-
-        if display_length > max_line_length then
-            max_line_length = display_length
-        end
-    end
-
-    -- Simple, optimized sizing for JetBrains Mono Regular
-    local is_category_dialog = string.find(content, "Submit Segment") or string.find(content, "Select category")
-
-    local char_width, vertical_padding, horizontal_padding
-
-    if is_category_dialog then
-        -- Category dialog - tight fit
-        char_width = base_font_size * 0.44
-        vertical_padding = base_font_size * 0.25
-        horizontal_padding = char_width * 0.8  -- Nice left spacing
-    else
-        -- Stats dialog - comfortable fit
-        char_width = base_font_size * 0.47
-        vertical_padding = base_font_size * 0.30
-        horizontal_padding = char_width * 0.85  -- Comfortable spacing
-    end
-
-    local line_height = base_font_size * 1.1  -- Tight line spacing for JetBrains Mono
-
-    -- Calculate precise content-fitted dimensions
-    local content_width = max_line_length * char_width
-    local box_width = content_width + (horizontal_padding * 2)
-    local text_height = (#lines - 1) * line_height + base_font_size
-    local box_height = text_height + (vertical_padding * 2)
-
-    -- Center the dialog
-    local box_x = (screen_width - box_width) / 2
-    local box_y = (screen_height - box_height) / 2
-
-    -- Round corner radius (inspired by modernz)
-    local corner_radius = math.min(12, base_font_size * 0.6)
-
-    -- Draw background box with rounded corners (modernz style)
     ass:new_event()
-    ass:pos(box_x, box_y)
     ass:an(7)
-    ass:append("{\\bord0\\shad0\\c&H000000&\\alpha&H20&}")  -- Slightly more opaque for better visibility
+    ass:pos(x, y)
+    ass:append(("{\\bord0\\blur0\\1c&H000000&\\1a&H%02X&\\4a&Hff&}"):format(BG_ALPHA))
     ass:draw_start()
-    -- Use round_rect_cw for rounded corners like modernz
-    ass:round_rect_cw(0, 0, box_width, box_height, corner_radius)
+    ass:round_rect_cw(0, 0, box_w, box_h, CORNER, CORNER)
     ass:draw_stop()
 
-    -- Text content with precise positioning (single layer with clean styling)
-    ass:new_event()
-    ass:pos(box_x + horizontal_padding, box_y + vertical_padding)  -- Position with exact padding
-    ass:an(7)  -- Top-left alignment
-    -- Clean text styling without competing borders/shadows
-    ass:append("{\\fs" .. base_font_size .. "\\fnJetBrains Mono\\c&HFFFFFF&\\bord0\\shad0\\q2}")
-    ass:append(content:gsub("\n", "\\N"))
+    -- One event per line/column (rather than a single \N-joined block) so
+    -- the box height, computed from LH, always matches what actually gets
+    -- drawn — ASS's own line spacing for \N doesn't necessarily match LH.
+    local sty = ("{\\bord1\\1c&HFFFFFF&\\3c&H000000&\\fs%d\\fsp0\\q2}"):format(FONT_SIZE)
+    for i, row in ipairs(rows) do
+        local ry = y + PAD + (i - 1) * LH
+        if row.label then
+            ass:new_event()
+            ass:an(7)
+            ass:pos(x + PAD, ry)
+            ass:append(sty .. row.label)
 
-    -- Update overlay with calculated dimensions
+            local vw = measure_text(row.value)
+            ass:new_event()
+            ass:an(7)
+            ass:pos(x + PAD + cw - vw, ry)
+            ass:append(sty .. row.value)
+        else
+            ass:new_event()
+            ass:an(7)
+            ass:pos(x + PAD, ry)
+            ass:append(sty .. (row.text or ""))
+        end
+    end
+
+    overlays.stats.res_x = width
+    overlays.stats.res_y = height
+    overlays.stats.z = 2000
     overlays.stats.data = ass.text
-    overlays.stats.res_x = screen_width
-    overlays.stats.res_y = screen_height
     overlays.stats:update()
 end
 
@@ -567,6 +589,100 @@ function hide_stats_dialog()
         overlays.stats.data = ""
         overlays.stats:update()
     end
+end
+
+-- Renders the segment-category picker with the focused row highlighted
+-- (white box, dark text) the same way playlist_manager highlights its
+-- focused playlist entry.
+function draw_segment_dialog(start_time, end_time, selected_index)
+    if not overlays.stats then
+        overlays.stats = mp.create_osd_overlay("ass-events")
+    end
+
+    local width, height = get_virt_size()
+    local header = ("Submit segment: %.1f–%.1fs (%.1fs)"):format(start_time, end_time, end_time - start_time)
+    local footer = "↑/↓ Navigate   Enter Submit   Esc Cancel"
+    local n = #segment_categories
+
+    -- Reserve a fixed indent for the focus arrow so rows never shift
+    -- between focused/unfocused — the arrow is drawn on top of it, not
+    -- inline with the text.
+    local arrow_w = measure_text("▶") + FONT_SIZE * 0.3
+
+    local cw = math.max(measure_text(header), measure_text(footer))
+    for i, category in ipairs(segment_categories) do
+        local w = measure_text(i .. ". " .. category.name) + arrow_w
+        if w > cw then cw = w end
+    end
+    cw = math.min(cw, width - PAD * 4)
+
+    local box_w = cw + PAD * 2
+    local box_h = (n + 3) * LH + PAD * 2 -- header + rows + gap + footer
+    local x = (width - box_w) / 2
+    local y = (height - box_h) / 2
+
+    local sty = ("{\\bord1\\1c&HFFFFFF&\\3c&H000000&\\fs%d\\fsp0\\q2}"):format(FONT_SIZE)
+    local focused_sty = ("{\\bord0\\1c&H222222&\\3c&H000000&\\fs%d\\fsp0\\q2}"):format(FONT_SIZE)
+
+    local ass = assdraw.ass_new()
+
+    -- Background
+    ass:new_event()
+    ass:an(7)
+    ass:pos(x, y)
+    ass:append(("{\\bord0\\blur0\\1c&H000000&\\1a&H%02X&\\4a&Hff&}"):format(BG_ALPHA))
+    ass:draw_start()
+    ass:round_rect_cw(0, 0, box_w, box_h, CORNER, CORNER)
+    ass:draw_stop()
+
+    -- Header
+    ass:new_event()
+    ass:an(7)
+    ass:pos(x + PAD, y + PAD)
+    ass:append(sty .. header)
+
+    -- Category rows. box_y (an7, top-left) and text_y (an4, middle-left)
+    -- are half a line apart so the row's text sits vertically centered in
+    -- its own highlight box.
+    for i, category in ipairs(segment_categories) do
+        local box_y = y + PAD + (i + 0.5) * LH
+        local text_y = box_y + LH / 2
+        local focused = i == selected_index
+
+        if focused then
+            ass:new_event()
+            ass:an(7)
+            ass:pos(x, box_y)
+            ass:append("{\\bord0\\blur0\\4a&Hff&\\1c&HFFFFFF&}")
+            ass:draw_start()
+            ass:rect_cw(0, 0, box_w, LH)
+            ass:draw_stop()
+        end
+
+        if focused then
+            ass:new_event()
+            ass:an(4)
+            ass:pos(x + PAD, text_y)
+            ass:append(focused_sty .. "▶")
+        end
+
+        ass:new_event()
+        ass:an(4)
+        ass:pos(x + PAD + arrow_w, text_y)
+        ass:append((focused and focused_sty or sty) .. i .. ". " .. category.name)
+    end
+
+    -- Footer hint
+    ass:new_event()
+    ass:an(7)
+    ass:pos(x + PAD, y + PAD + (n + 2) * LH)
+    ass:append(sty .. footer)
+
+    overlays.stats.res_x = width
+    overlays.stats.res_y = height
+    overlays.stats.z = 2000
+    overlays.stats.data = ass.text
+    overlays.stats:update()
 end
 
 function get_user_stats()
@@ -604,7 +720,7 @@ function get_user_stats()
             show_stats_dialog(formatted_stats)
             stats_visible = true
         else
-            show_toast("Failed to get user stats: " .. (error_msg or "unknown error"), 5)
+            show_toast("Failed to get user stats: " .. (error_msg or "unknown error"), "error", 5)
             mp.msg.warn("❌ Failed to get user stats: " .. (error_msg or "unknown error"))
         end
         return
@@ -622,30 +738,10 @@ function get_user_stats()
 end
 
 -- SEGMENT SUBMISSION SYSTEM
--- Create segment submission dialog content
-function create_segment_dialog_content(start_time, end_time, selected_index)
-    selected_index = selected_index or 1
-    local duration = end_time - start_time
-    local lines = {}
-    table.insert(lines, string.format("Submit Segment: %.1f - %.1f seconds (%.1fs)", start_time, end_time, duration))
-    table.insert(lines, "")
-    table.insert(lines, "Select category:")
-
-    for i, category in ipairs(segment_categories) do
-        local prefix = (selected_index == i) and "► " or "  "
-        table.insert(lines, string.format("%s%d. %s", prefix, i, category.name))
-    end
-
-    table.insert(lines, "")
-    table.insert(lines, "↑/↓: Navigate  Enter: Submit  Esc: Cancel")
-
-    return table.concat(lines, "\n")
-end
-
 -- Submit segment to SponsorBlock API
 function submit_segment(start_time, end_time, category)
     if not state.youtube_id then
-        show_toast("No YouTube video detected", 3)
+        show_toast("No YouTube video detected", "error")
         return
     end
 
@@ -681,13 +777,13 @@ function submit_segment(start_time, end_time, category)
     local data, error_msg = http_request(endpoints.skip_segments, "POST", nil, json_string)
 
     if data then
-        show_toast("Segment submitted successfully", 3)
+        show_toast("Segment submitted successfully", "success")
         mp.msg.info("✅ Segment submitted successfully")
         mp.msg.info("📊 Response: " .. utils.to_string(data))
         -- Refresh segments to include our submission
         get_segments()
     else
-        show_toast("Failed to submit segment: " .. (error_msg or "unknown error"), 5)
+        show_toast("Failed to submit segment: " .. (error_msg or "unknown error"), "error", 5)
         mp.msg.warn("❌ Failed to submit segment: " .. (error_msg or "unknown error"))
     end
 end
@@ -699,8 +795,7 @@ function show_segment_dialog(start_time, end_time)
 
     -- Function to update dialog content with current selection
     function update_dialog_content()
-        local content = create_segment_dialog_content(start_time, end_time, selected_index)
-        show_stats_dialog(content)
+        draw_segment_dialog(start_time, end_time, selected_index)
     end
 
     -- Function to clean up all key bindings
@@ -732,7 +827,7 @@ function show_segment_dialog(start_time, end_time)
         hide_stats_dialog()
         segment_submission.dialog_visible = false
         cleanup_bindings()
-        show_toast("Segment submission cancelled", 2)
+        show_toast("Segment submission cancelled", "info", 2)
     end
 
     -- Function to move selection up
@@ -789,13 +884,13 @@ function toggle_segment_marking()
     end
 
     if not state.youtube_id then
-        show_toast("SponsorBlock: YouTube video required", 3)
+        show_toast("SponsorBlock: YouTube video required", "error")
         return
     end
 
     local current_time = mp.get_property_number("time-pos")
     if not current_time then
-        show_toast("Could not get current time", 3)
+        show_toast("Could not get current time", "error")
         return
     end
 
@@ -803,23 +898,23 @@ function toggle_segment_marking()
         -- Start marking
         segment_submission.start_time = current_time
         segment_submission.marking_segment = true
-        show_toast(string.format("Segment start marked at %.1f seconds", current_time), 3)
+        show_toast(string.format("Segment start marked at %.1f seconds", current_time), "info")
         mp.msg.info(string.format("📍 Segment start marked at %.1f seconds", current_time))
     else
         -- End marking and show dialog
         if current_time <= segment_submission.start_time then
-            show_toast("End time must be after start time", 3)
+            show_toast("End time must be after start time", "error")
             return
         end
 
         local duration = current_time - segment_submission.start_time
         if duration < 0.5 then
-            show_toast("Segment too short (minimum 0.5 seconds)", 3)
+            show_toast("Segment too short (minimum 0.5 seconds)", "error")
             return
         end
 
         segment_submission.marking_segment = false
-        show_toast(string.format("Segment marked: %.1f - %.1f seconds", segment_submission.start_time, current_time), 3)
+        show_toast(string.format("Segment marked: %.1f - %.1f seconds", segment_submission.start_time, current_time), "info")
         mp.msg.info(string.format("🏁 Segment marked: %.1f - %.1f seconds", segment_submission.start_time, current_time))
 
         show_segment_dialog(segment_submission.start_time, current_time)
@@ -870,7 +965,7 @@ function cancel_segment_marking()
     if segment_submission.marking_segment then
         segment_submission.marking_segment = false
         segment_submission.start_time = nil
-        show_toast("Segment marking cancelled", 2)
+        show_toast("Segment marking cancelled", "info", 2)
         mp.msg.info("❌ Segment marking cancelled")
     end
 end
