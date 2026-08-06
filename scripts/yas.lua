@@ -422,15 +422,23 @@ measure_osd.compute_bounds = true
 local text_width_cache = {}
 local text_width_cache_count = 0
 
--- Virtual canvas width: res_y is fixed at 720, res_x scales with the
--- display's aspect ratio so pixels stay square on any screen.
+-- Virtual canvas size: behaves like a 720p canvas on displays up to 1080p
+-- (res_x scales with aspect ratio, panels scale normally), but caps how
+-- much further it grows above that so panels don't keep getting physically
+-- bigger — in real rendered pixels — on very large/high-res displays; they
+-- render at most as large as they would on a 1080p screen.
+local REF_H = 720
+local MAX_SCALE = 1080 / REF_H
 local function get_virt_size()
     local osd = mp.get_property_native("osd-dimensions") or {}
+    local real_h = (osd.h and osd.h > 0) and osd.h or REF_H
+    local scale = math.min(real_h / REF_H, MAX_SCALE)
+    local virt_h = real_h / scale
     local ar = osd.aspect
     if not ar or ar <= 0 then
         ar = (osd.w and osd.h and osd.h > 0) and (osd.w / osd.h) or (16 / 9)
     end
-    return math.floor(720 * ar), 720
+    return math.floor(virt_h * ar), math.floor(virt_h)
 end
 
 -- Measures the rendered pixel width of `text` at FONT_SIZE on the current
