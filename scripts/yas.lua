@@ -27,7 +27,8 @@ local endpoints = {
 local state = {
     segments = nil,
     youtube_id = nil,
-    has_valid_user_id = false
+    has_valid_user_id = false,
+    base_chapters = nil -- video's own chapters, captured once, before SponsorBlock ones are added
 }
 
 -- User stats caching variables
@@ -231,7 +232,16 @@ end
 
 -- Create chapters in MPV UI
 function create_chapters()
-    local chapters = mp.get_property_native("chapter-list") or {}
+    -- Capture the video's own chapters once per video, so re-running this
+    -- (e.g. after a submission refresh) rebuilds from that baseline instead
+    -- of piling SponsorBlock chapters on top of ones it already added
+    if not state.base_chapters then
+        state.base_chapters = mp.get_property_native("chapter-list") or {}
+    end
+    local chapters = {}
+    for _, chapter in ipairs(state.base_chapters) do
+        table.insert(chapters, chapter)
+    end
     local duration = mp.get_property_native("duration")
     for _, segment in ipairs(state.segments) do
         table.insert(chapters, {
@@ -843,6 +853,7 @@ function end_file()
     -- Reset state variables
     state.segments = nil
     state.youtube_id = nil
+    state.base_chapters = nil
     user_stats_cache.cached_data = nil
     user_stats_cache.last_fetch_time = 0
     segment_submission.marking_segment = false
