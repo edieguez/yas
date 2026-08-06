@@ -863,7 +863,7 @@ do
     end
     options.categories = table.concat(cats, ",")
 
-    if options.user_id and #options.user_id == 36 and options.user_id:match("^[%w]+$") then
+    if options.user_id and #options.user_id >= 30 and options.user_id:match("^[%w]+$") then
         state.has_valid_user_id = true
         mp.msg.info(("Found user_id %s in config"):format(options.user_id))
         mp.msg.info("   z to show/hide user stats dialog")
