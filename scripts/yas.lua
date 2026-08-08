@@ -25,7 +25,8 @@ local options = {
 local endpoints = {
     skip_segments = ("%s/api/skipSegments"):format(options.server_address),
     viewed_video_sponsor_time = ("%s/api/viewedVideoSponsorTime"):format(options.server_address),
-    user_stats = ("%s/api/userStats"):format(options.server_address)
+    user_stats = ("%s/api/userStats"):format(options.server_address),
+    user_info = ("%s/api/userInfo"):format(options.server_address)
 }
 
 -- State variables
@@ -130,6 +131,64 @@ local function persist_generated_user_id(user_id)
     out:close()
     mp.msg.info("💾 Saved generated userID to " .. conf_path)
 end
+
+-- Local, per-installation tally of segments this script has actually
+-- skipped/muted — independent of any user_id, and of SponsorBlock's own
+-- server-side stats (which only count segments *you submitted*, and never
+-- move just from watching/skipping). Mirrors the reference browser
+-- extension's Config.config.skipCount / minutesSaved, which are likewise
+-- purely local and have no server-side equivalent.
+local local_stats = {
+    skip_count = 0,
+    minutes_saved = 0
+}
+
+local function local_stats_path()
+    local ok, path = pcall(mp.command_native, {"expand-path", "~~/yas_stats.conf"})
+    if not ok or not path or path == "" then return nil end
+    return path
+end
+
+local function load_local_stats()
+    local path = local_stats_path()
+    if not path then return end
+    local f = io.open(path, "r")
+    if not f then return end
+    for line in f:lines() do
+        -- Note: %a is letters only, not %w — must include "_" explicitly
+        -- or "skip_count"/"minutes_saved" never match.
+        local key, value = line:match("^([%a_]+)=([%d%.]+)$")
+        if key == "skip_count" then
+            local_stats.skip_count = tonumber(value) or 0
+        elseif key == "minutes_saved" then
+            local_stats.minutes_saved = tonumber(value) or 0
+        end
+    end
+    f:close()
+end
+
+local function save_local_stats()
+    local path = local_stats_path()
+    if not path then return end
+    local out, err = io.open(path, "w")
+    if not out then
+        mp.msg.warn("⚠️ Could not write " .. path .. " to persist local stats: " .. tostring(err))
+        return
+    end
+    out:write(("skip_count=%d\nminutes_saved=%.4f\n"):format(local_stats.skip_count, local_stats.minutes_saved))
+    out:close()
+end
+
+-- Records one real skip/mute action toward the local tally and persists it
+-- immediately — writes are rare (at most a handful per video), so there's
+-- no need to batch them.
+local function record_local_skip(segment)
+    local_stats.skip_count = local_stats.skip_count + 1
+    local_stats.minutes_saved = local_stats.minutes_saved + (segment.end_time - segment.start_time) / 60
+    save_local_stats()
+end
+
+load_local_stats()
 
 -- INITIALIZATION
 -- Load options from config file: script-opts/yas.conf
@@ -360,16 +419,34 @@ function skip_ads(_, pos)
                     show_toast(("Muted %s (%.1fs)"):format(segment.category, segment.end_time - segment.start_time), "info")
                     mp.msg.info(("🔇 Muting segment: %s [%s - %s]"):format(segment.category, segment.start_time, segment.end_time))
                     report_skip(segment)
+                    record_local_skip(segment)
                 end
             else
                 show_toast(("Skipped %s (%.1fs)"):format(segment.category, segment.end_time - segment.start_time), "info")
                 mp.msg.info(("⏭️ Skipping segment: %s [%s - %s]"):format(segment.category, segment.start_time, segment.end_time))
                 mp.set_property("time-pos", segment.end_time + 0.001)
                 report_skip(segment)
+                record_local_skip(segment)
             end
             return
         end
     end
+end
+
+-- Formats a minutes value as "Nd Nh N.Nm" (omitting zero-value leading
+-- components), matching the reference browser extension's getFormattedHours().
+local function format_duration(total_minutes)
+    total_minutes = math.floor((total_minutes or 0) * 10 + 0.5) / 10 -- round to 1 decimal
+    local years = math.floor(total_minutes / 525600)
+    local days = math.floor(total_minutes / 1440) % 365
+    local hours = math.floor(total_minutes / 60) % 24
+    local minutes = total_minutes % 60
+    local parts = {}
+    if years > 0 then table.insert(parts, years .. "y") end
+    if days > 0 then table.insert(parts, days .. "d") end
+    if hours > 0 then table.insert(parts, hours .. "h") end
+    table.insert(parts, ("%.1fm"):format(minutes))
+    return table.concat(parts, " ")
 end
 
 -- Returns a list of rows for show_stats_dialog(): each is either
@@ -388,14 +465,24 @@ function format_user_stats(data)
     if data.overallStats then
         table.insert(rows, {text = "Overall Statistics"})
         if data.overallStats.minutesSaved then
-            local hours = math.floor(data.overallStats.minutesSaved / 60)
-            local minutes = math.floor(data.overallStats.minutesSaved % 60)
-            table.insert(rows, {label = "Time Saved", value = hours .. "h " .. minutes .. "m"})
+            table.insert(rows, {label = "Time Saved", value = format_duration(data.overallStats.minutesSaved)})
         end
         if data.overallStats.segmentCount then
             table.insert(rows, {label = "Segments Submitted", value = tostring(data.overallStats.segmentCount)})
         end
     end
+
+    -- "Your Work" style summary, matching the reference browser extension.
+    -- "Saved others" is server-side data (segments you submitted, viewed by
+    -- anyone); "You've skipped" is this installation's own local tally —
+    -- SponsorBlock has no server-side concept of segments a viewer skipped.
+    table.insert(rows, {text = ""})
+    if data.viewCount and data.overallStats and data.overallStats.minutesSaved then
+        table.insert(rows, {text = ("Saved others from %d segments (%s)"):format(
+            data.viewCount, format_duration(data.overallStats.minutesSaved))})
+    end
+    table.insert(rows, {text = ("You've skipped %d segments (%s)"):format(
+        local_stats.skip_count, format_duration(local_stats.minutes_saved))})
 
     -- Category breakdown
     if data.categoryCount then
@@ -785,6 +872,18 @@ function get_user_stats()
             mp.msg.warn("❌ Failed to get user stats: " .. (error_msg or "unknown error"))
         end
         return
+    end
+
+    -- /api/userStats doesn't expose viewCount (segments *you* submitted,
+    -- viewed by anyone) — fetch it separately from /api/userInfo. Best
+    -- effort: if this fails, the "Saved others from..." line is just
+    -- omitted rather than failing the whole dialog.
+    local view_data = http_request(endpoints.user_info, "GET", {
+        userID = options.user_id,
+        values = '["viewCount"]'
+    })
+    if view_data and view_data.viewCount then
+        data.viewCount = view_data.viewCount
     end
 
     -- Successfully fetched new data - update cache
