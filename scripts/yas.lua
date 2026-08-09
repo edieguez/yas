@@ -51,7 +51,10 @@ local segment_submission = {
     marking_segment = false,
     start_time = nil,
     dialog_visible = false,
-    keybindings_active = false
+    keybindings_active = false,
+    -- Set while hold_playback_open() is holding keep-open at "always" for
+    -- the marking/dialog workflow; holds the value to restore it to.
+    prev_keep_open = nil
 }
 
 -- Set by show_segment_dialog() while its dialog is open, so end_file() can
@@ -977,6 +980,7 @@ function show_segment_dialog(start_time, end_time)
         hide_stats_dialog()
         segment_submission.dialog_visible = false
         cleanup_bindings()
+        release_playback_open()
 
         local category = segment_categories[selected_index]
         submit_segment(start_time, end_time, category.key)
@@ -987,6 +991,7 @@ function show_segment_dialog(start_time, end_time)
         hide_stats_dialog()
         segment_submission.dialog_visible = false
         cleanup_bindings()
+        release_playback_open()
         show_toast("Segment submission cancelled", "info", 2)
     end
 
@@ -1037,6 +1042,52 @@ function show_segment_dialog(start_time, end_time)
     end
 end
 
+-- Marking a segment (start pressed) or having its confirmation dialog
+-- open must not let mpv auto-advance to the next playlist item mid-
+-- workflow - most noticeably when the segment's end is meant to reach
+-- the very end of the video: without this, mpv's native playlist
+-- auto-advance (unaffected by the global keep-open=yes, which only
+-- holds the true last playlist item open) fires the instant EOF is
+-- reached, and end_file() below reactively wipes the in-progress
+-- mark/dialog before the user can even press ; a second time or pick a
+-- category. Runtime-toggling keep-open to "always" while marking/dialog
+-- is active makes THIS file freeze at EOF too, exactly like the true-
+-- last-item case already does - zero effect on ordinary playback since
+-- the toggle only engages while the ; workflow is actually open.
+function hold_playback_open()
+    if segment_submission.prev_keep_open == nil then
+        segment_submission.prev_keep_open = mp.get_property("keep-open", "yes")
+        mp.set_property("keep-open", "always")
+    end
+end
+
+-- Restores keep-open without trying to advance the playlist - used from
+-- end_file(), where a transition (manual nav or otherwise) is already
+-- underway, so forcing another one would be wrong.
+function restore_keep_open()
+    if segment_submission.prev_keep_open ~= nil then
+        mp.set_property("keep-open", segment_submission.prev_keep_open)
+        segment_submission.prev_keep_open = nil
+    end
+end
+
+-- Restores keep-open and, if the hold left playback frozen at EOF
+-- (segment ended up marked/submitted right at the end of the video),
+-- advances to the next playlist item ourselves - reverting the property
+-- alone doesn't retroactively resume mpv's already-made "freeze"
+-- decision. "weak" is a no-op if there's no next item (true last
+-- video), matching what keep-open=yes would already do on its own.
+-- Explicitly unpauses too, since the freeze paused playback and that
+-- pause state would otherwise carry into the next file.
+function release_playback_open()
+    local was_held = segment_submission.prev_keep_open ~= nil
+    restore_keep_open()
+    if was_held and mp.get_property_bool("eof-reached", false) then
+        mp.commandv("playlist-next", "weak")
+        mp.set_property_bool("pause", false)
+    end
+end
+
 -- Toggle segment marking (like SponsorBlock extension)
 function toggle_segment_marking()
     if segment_submission.dialog_visible then
@@ -1058,6 +1109,7 @@ function toggle_segment_marking()
         -- Start marking
         segment_submission.start_time = current_time
         segment_submission.marking_segment = true
+        hold_playback_open()
         show_toast(string.format("Segment start marked at %.1f seconds", current_time), "info")
         mp.msg.info(string.format("📍 Segment start marked at %.1f seconds", current_time))
     else
@@ -1125,6 +1177,7 @@ function cancel_segment_marking()
     if segment_submission.marking_segment then
         segment_submission.marking_segment = false
         segment_submission.start_time = nil
+        release_playback_open()
         show_toast("Segment marking cancelled", "info", 2)
         mp.msg.info("❌ Segment marking cancelled")
     end
@@ -1170,6 +1223,11 @@ function end_file()
     segment_submission.marking_segment = false
     segment_submission.start_time = nil
     segment_submission.dialog_visible = false
+    -- Restore only - a transition is already underway here (natural
+    -- advance or manual nav away mid-mark), so forcing another one via
+    -- release_playback_open() would be wrong. Safety net against
+    -- keep-open=always leaking onto the next-loaded file.
+    restore_keep_open()
 
     hide_stats_dialog()
     stats_visible = false
