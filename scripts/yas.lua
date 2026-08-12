@@ -156,17 +156,6 @@ local function local_stats_path()
     return path
 end
 
--- Defensively ensure the parent directory exists - io.open(path, "w")
--- (used below) does not create missing parent directories on its own,
--- so save_local_stats() would otherwise silently no-op forever on a
--- fresh install/machine. Mirrors perpetual_playlist.lua's own fix.
-pcall(function()
-    local path = local_stats_path()
-    if not path then return end
-    local dir = utils.split_path(path)
-    mp.command_native({name = "subprocess", args = {"mkdir", "-p", dir}, playback_only = false})
-end)
-
 local function load_local_stats()
     local path = local_stats_path()
     if not path then return end
@@ -189,6 +178,22 @@ local function save_local_stats()
     local path = local_stats_path()
     if not path then return end
     local out, err = io.open(path, "w")
+    if not out then
+        -- io.open(path, "w") does not create missing parent directories
+        -- on its own, so a fresh install/machine would otherwise
+        -- silently never persist stats. Only shell out to mkdir -p here,
+        -- in this rare fallback path (once, on actual write failure),
+        -- not proactively on every script load.
+        pcall(function()
+            local dir = utils.split_path(path) -- split_path returns (dir, filename); only dir wanted here
+            mp.command_native({
+                name = "subprocess",
+                args = {"mkdir", "-p", dir},
+                playback_only = false
+            })
+        end)
+        out, err = io.open(path, "w")
+    end
     if not out then
         mp.msg.warn("⚠️ Could not write " .. path .. " to persist local stats: " .. tostring(err))
         return
