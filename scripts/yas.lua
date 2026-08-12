@@ -146,11 +146,26 @@ local local_stats = {
     minutes_saved = 0
 }
 
+-- Kept outside the git-tracked config tree (~~/ resolves inside it), in
+-- the XDG state dir instead - plain ~/ path, not a ~~ meta-path: ~~state/
+-- was tried for perpetual-playlist's IPC socket and proved unreliable on
+-- some mpv builds (fell back into the config tree, or failed outright).
 local function local_stats_path()
-    local ok, path = pcall(mp.command_native, {"expand-path", "~~/yas_stats.conf"})
+    local ok, path = pcall(mp.command_native, {"expand-path", "~/.local/state/mpv/yas_stats.conf"})
     if not ok or not path or path == "" then return nil end
     return path
 end
+
+-- Defensively ensure the parent directory exists - io.open(path, "w")
+-- (used below) does not create missing parent directories on its own,
+-- so save_local_stats() would otherwise silently no-op forever on a
+-- fresh install/machine. Mirrors perpetual_playlist.lua's own fix.
+pcall(function()
+    local path = local_stats_path()
+    if not path then return end
+    local dir = utils.split_path(path)
+    mp.command_native({name = "subprocess", args = {"mkdir", "-p", dir}, playback_only = false})
+end)
 
 local function load_local_stats()
     local path = local_stats_path()
