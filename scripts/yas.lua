@@ -17,6 +17,9 @@ local options = {
     -- reference extension doesn't auto-apply either, so they're not
     -- requested here.
     action_types = "skip,mute",
+    -- Optional manual override (e.g. pinning a specific ID). Leave empty
+    -- to auto-generate one — the generated ID is persisted outside this
+    -- file, see local_user_id_path() below, not written back here.
     user_id = ""
 }
 
@@ -83,56 +86,64 @@ local segment_categories = {
     {key = "music_offtopic", name = "Non-Music Section", desc = "Only for music videos, covers non-music portions"}
 }
 
--- Writes a freshly generated user_id back into script-opts/yas.conf so
--- future launches reuse the same identity instead of mp.options silently
--- forgetting it and this script minting a new one every session — which
+-- Kept outside the git-tracked config tree, in the XDG state dir - same
+-- rationale and pattern as local_stats_path() below. Generated identity
+-- state doesn't belong in script-opts/yas.conf, which mp.options treats
+-- as user-editable config; a script silently rewriting it is the same
+-- smell already fixed for the playlist/stats files.
+local function local_user_id_path()
+    local ok, path = pcall(mp.command_native, {"expand-path", "~/.local/state/mpv/yas_user_id"})
+    if not ok or not path or path == "" then return nil end
+    return path
+end
+
+-- Loads a previously generated user_id, if any, so future launches reuse
+-- the same identity instead of minting a new one every session - which
 -- would keep resetting submission history/reputation and always show
 -- near-empty stats.
+local function load_generated_user_id()
+    local path = local_user_id_path()
+    if not path then return nil end
+    local f = io.open(path, "r")
+    if not f then return nil end
+    local id = f:read("l")
+    f:close()
+    if id then id = id:match("^%s*(.-)%s*$") end -- trim
+    return id
+end
+
+-- Persists a freshly generated user_id to local_user_id_path().
 local function persist_generated_user_id(user_id)
-    local ok, conf_path = pcall(mp.command_native, {"expand-path", "~~/script-opts/yas.conf"})
-    if not ok or not conf_path or conf_path == "" then
-        mp.msg.warn("⚠️ Could not resolve script-opts/yas.conf path; generated userID won't persist")
+    local path = local_user_id_path()
+    if not path then
+        mp.msg.warn("⚠️ Could not resolve yas_user_id path; generated userID won't persist")
         return
     end
 
-    -- Drop any existing *active* (uncommented) user_id= line — there
-    -- shouldn't be a valid one, since that's what triggered generating a
-    -- new one, but an empty `user_id=` is possible — then append the new
-    -- one. Filtered line-by-line rather than with a whole-string gsub:
-    -- Lua patterns have no line-start anchor, so a pattern matching
-    -- "user_id=" anywhere would also strip it out of "# user_id=" and
-    -- mangle that comment.
-    local lines = {}
-    local f = io.open(conf_path, "r")
-    if f then
-        for line in f:lines() do
-            if not line:match("^%s*user_id%s*=") then
-                table.insert(lines, line)
-            end
-        end
-        f:close()
-    end
-    table.insert(lines, "user_id=" .. user_id)
-    local updated = table.concat(lines, "\n") .. "\n"
-
-    -- A fresh install may not have a script-opts/ directory yet
-    local conf_dir = conf_path:match("^(.*)[/\\][^/\\]+$")
-    if conf_dir then
-        mp.command_native({
-            name = "subprocess",
-            playback_only = false,
-            args = {"mkdir", "-p", conf_dir}
-        })
-    end
-
-    local out, err = io.open(conf_path, "w")
+    local out, err = io.open(path, "w")
     if not out then
-        mp.msg.warn("⚠️ Could not write " .. conf_path .. " to persist generated userID: " .. tostring(err))
+        -- io.open(path, "w") does not create missing parent directories
+        -- on its own, so a fresh install/machine would otherwise
+        -- silently never persist the generated ID. Only shell out to
+        -- mkdir -p here, in this rare fallback path (once, on actual
+        -- write failure), not proactively on every script load.
+        pcall(function()
+            local dir = utils.split_path(path) -- split_path returns (dir, filename); only dir wanted here
+            mp.command_native({
+                name = "subprocess",
+                args = {"mkdir", "-p", dir},
+                playback_only = false
+            })
+        end)
+        out, err = io.open(path, "w")
+    end
+    if not out then
+        mp.msg.warn("⚠️ Could not write " .. path .. " to persist generated userID: " .. tostring(err))
         return
     end
-    out:write(updated)
+    out:write(user_id .. "\n")
     out:close()
-    mp.msg.info("💾 Saved generated userID to " .. conf_path)
+    mp.msg.info("💾 Saved generated userID to " .. path)
 end
 
 -- Local, per-installation tally of segments this script has actually
@@ -217,19 +228,27 @@ load_local_stats()
 -- Load options from config file: script-opts/yas.conf
 mpoptions.read_options(options, "yas")
 
--- Generate local userID if not set (required for submissions)
+-- Resolve userID: a manual override in yas.conf wins; otherwise reuse a
+-- previously generated one from the state dir; otherwise generate and
+-- persist a new one (required for submissions).
 if not options.user_id or #options.user_id < 30 then
-    -- Generate a random 32-character userID for submissions
-    local chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
-    local user_id = ""
-    math.randomseed(os.time())
-    for i = 1, 32 do
-        local rand = math.random(1, #chars)
-        user_id = user_id .. string.sub(chars, rand, rand)
+    local existing_id = load_generated_user_id()
+    if existing_id and #existing_id >= 30 then
+        options.user_id = existing_id
+        mp.msg.info("🆔 Reusing previously generated local userID: " .. options.user_id)
+    else
+        -- Generate a random 32-character userID for submissions
+        local chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+        local user_id = ""
+        math.randomseed(os.time())
+        for i = 1, 32 do
+            local rand = math.random(1, #chars)
+            user_id = user_id .. string.sub(chars, rand, rand)
+        end
+        options.user_id = user_id
+        mp.msg.info("🆔 Generated new local userID for submissions: " .. options.user_id)
+        persist_generated_user_id(user_id)
     end
-    options.user_id = user_id
-    mp.msg.info("🆔 Generated new local userID for submissions: " .. options.user_id)
-    persist_generated_user_id(user_id)
 end
 
 -- HELPER FUNCTIONS

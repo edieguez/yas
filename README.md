@@ -12,7 +12,6 @@ SponsorBlock plugin for MPV implemented (mostly) in Lua
 
 1. Copy `yas.lua` to your MPV `scripts` directory
 2. Copy `yas.conf.template` to `script-opts/yas.conf` and configure
-3. Set your SponsorBlock user ID in the config for segment submission
 
 ## Configuration
 
@@ -22,9 +21,12 @@ Edit `script-opts/yas.conf`:
 # Categories to skip (comma-separated)
 categories=sponsor,selfpromo,interaction,intro,outro,preview,hook,filler
 
-# Your SponsorBlock user ID (required for submitting segments)
-# Get from https://sponsor.ajay.app/stats/ or browser extension
-user_id=your_32_character_user_id_here
+# Optional: pin a specific local user ID (required for submitting
+# segments). This must be a randomly generated 30+ character string, NOT
+# the public userID from the stats page. Leave commented out to
+# auto-generate one (recommended) - the generated ID is stored in
+# ~/.local/state/mpv/yas_user_id, not in this file.
+# user_id=your_32_character_user_id_here
 ```
 
 ## Usage
