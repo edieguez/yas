@@ -252,6 +252,22 @@ if not options.user_id or #options.user_id < 30 then
 end
 
 -- HELPER FUNCTIONS
+-- Wraps a callback so an uncaught error inside it is logged and swallowed
+-- instead of propagating into mpv's event dispatch. mpv gives a script no
+-- safety net of its own here: an error escaping one of this script's
+-- registered event/property callbacks kills its entire event loop, so no
+-- further file-loaded/end-file/property-change events ever reach it again
+-- for the rest of the session (looks like the plugin "crashed" and never
+-- came back). Used to wrap every mpv-registered entry point below.
+local function safe_call(fn, name)
+    return function(...)
+        local ok, err = pcall(fn, ...)
+        if not ok then
+            mp.msg.error(("💥 yas: unhandled error in %s: %s"):format(name, tostring(err)))
+        end
+    end
+end
+
 function http_request(url, method, query_params, json_body)
     local curl_cmd = { "curl", "--location", "--silent" }
     method = method or "GET"
@@ -369,7 +385,14 @@ function get_segments()
     end
     state.segments = {}
     for _, seg in ipairs(data) do
-        if seg.segment and #seg.segment == 2 then
+        -- Trust nothing from the API beyond "looks like a segment": a
+        -- missing/malformed UUID or category would otherwise throw later
+        -- (string.sub/gsub on nil) from inside the file-loaded handler,
+        -- which is fatal for the whole script - see safe_call() below.
+        if seg.segment and #seg.segment == 2
+            and type(seg.UUID) == "string" and seg.UUID ~= ""
+            and type(seg.category) == "string" and seg.category ~= ""
+            and type(seg.actionType) == "string" then
             local start_time, end_time = tonumber(seg.segment[1]), tonumber(seg.segment[2])
             if start_time and end_time and end_time > start_time then
                 table.insert(state.segments, {
@@ -382,15 +405,19 @@ function get_segments()
                     skip_reported = false
                 })
             end
+        else
+            mp.msg.warn("⚠️ Skipping malformed SponsorBlock segment: " .. utils.to_string(seg))
         end
     end
     if #state.segments > 0 then
         mp.msg.info(("✅ SponsorBlock: %d segments found"):format(#state.segments))
         create_chapters()
         -- Avoid stacking duplicate observers if segments are re-fetched
-        -- mid-video (e.g. after a submission refresh)
-        mp.unobserve_property(skip_ads)
-        mp.observe_property("time-pos", "native", skip_ads)
+        -- mid-video (e.g. after a submission refresh). Always the same
+        -- skip_ads_safe reference (defined after skip_ads() below) so
+        -- unobserve matches what was actually observed.
+        mp.unobserve_property(skip_ads_safe)
+        mp.observe_property("time-pos", "native", skip_ads_safe)
     else
         mp.msg.info("ℹ️ SponsorBlock: no segments found")
     end
@@ -411,7 +438,7 @@ function create_chapters()
     local duration = mp.get_property_native("duration")
     for _, segment in ipairs(state.segments) do
         table.insert(chapters, {
-            title = segment.category:gsub("^%l", string.upper):gsub("_", " ")
+            title = (segment.category or "unknown"):gsub("^%l", string.upper):gsub("_", " ")
                 .. (segment.action == "mute" and " [Mute]" or "")
                 .. " (" .. segment.short_uuid .. ")",
             time = (not duration or duration > segment.start_time) and segment.start_time or duration - 0.001
@@ -474,6 +501,10 @@ function skip_ads(_, pos)
         end
     end
 end
+
+-- The wrapped reference actually handed to mp.observe_property/
+-- mp.unobserve_property everywhere - see safe_call() above.
+skip_ads_safe = safe_call(skip_ads, "skip_ads")
 
 -- Formats a minutes value as "Nd Nh N.Nm" (omitting zero-value leading
 -- components), matching the reference browser extension's getFormattedHours().
@@ -1270,7 +1301,7 @@ function end_file()
 
     hide_stats_dialog()
     stats_visible = false
-    mp.unobserve_property(skip_ads)
+    mp.unobserve_property(skip_ads_safe)
 
     -- Deactivate segment submission keybindings
     deactivate_segment_keybindings()
@@ -1296,6 +1327,8 @@ do
     end
 end
 
--- Register events
-mp.register_event("file-loaded", file_loaded)
-mp.register_event("end-file", end_file)
+-- Register events. Wrapped in safe_call() so an uncaught error in either
+-- handler (e.g. from unexpected SponsorBlock API data) can't take down the
+-- script's whole event loop - see safe_call() above.
+mp.register_event("file-loaded", safe_call(file_loaded, "file_loaded"))
+mp.register_event("end-file", safe_call(end_file, "end_file"))
