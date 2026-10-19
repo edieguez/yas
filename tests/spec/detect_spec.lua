@@ -4,7 +4,7 @@ local F = require("support.fixtures")
 local function detect(opts)
     local h = mpv.new(opts)
     local env = h:load()
-    return env.detect_youtube_id(), h
+    return env.detect.youtube_id(), h
 end
 
 describe("detect_youtube_id", function()

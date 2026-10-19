@@ -113,10 +113,11 @@ describe("user ID", function()
     end)
 
     it("still generates distinct, valid IDs without /dev/urandom (e.g. Windows)", function()
+        local real_io, real_open = io, io.open -- the harness swaps the global io while loading
         local no_urandom = setmetatable({ open = function(path, mode)
             if path == "/dev/urandom" then return nil, "no such file" end
-            return io.open(path, mode)
-        end }, { __index = io })
+            return real_open(path, mode)
+        end }, { __index = real_io })
         local a = F.boot({ generate_id = true, no_file = true, env = { io = no_urandom, os = fixed_os(1700000000) } })
         local b = F.boot({ generate_id = true, no_file = true, env = { io = no_urandom, os = fixed_os(1700000000) } })
         expect.matches(a:read_state_file("yas_user_id"), "^%w+\n$")

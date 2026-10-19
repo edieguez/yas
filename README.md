@@ -113,12 +113,40 @@ make test-all        # every installed interpreter (luajit, lua5.1 ... lua5.4)
 Without `make`: `luajit tests/run.lua`, from the repository root. On macOS,
 Homebrew's mpv already depends on LuaJIT, so `luajit` is usually installed.
 
+### Code layout
+
+`scripts/yas.lua` is a single file in sections. Each section is a table of
+functions, and its private helpers live inside its own `do ... end` block,
+so nothing is global and sections only reach each other through those
+tables. The file returns its sections at the end: mpv ignores that, and the
+test suite uses it.
+
+| Section | Responsibility |
+| --- | --- |
+| `core` | Options, shared state, `safe_call` |
+| `categories` | The 12 SponsorBlock categories, in the extension's order |
+| `timefmt` | Durations (`1m 5s`) and positions (`12:34.2`) |
+| `store` | Owner-only files and the local skip tally in `~/.local/state/mpv` |
+| `identity` | The private user ID: resolve, mask, keep it off command lines |
+| `http` | Asynchronous curl requests and response parsing |
+| `detect` | YouTube ID of the playing file |
+| `ui` | Toasts, the key-prompt line, the stats panel, the category dialog |
+| `segments` | Fetching, chapters, skip/mute, prompts, highlights, votes |
+| `stats` | The stats panel (`z`) |
+| `submit` | Marking (`;` `:`), the category dialog, submissions |
+| startup | Reads `yas.conf`, binds keys, registers mpv events |
+
+Because sections call each other through their tables
+(`http.request(...)`), a test can replace one function without touching
+the rest.
+
 ### Writing tests
 
 Specs live in `tests/spec/*_spec.lua` and use `describe`, `it`, `before_each`
 and the assertions in `tests/support/expect.lua`. `tests/support/fixtures.lua`
 has `F.boot{...}`, which loads the script for a YouTube URL with canned API
-responses and returns the harness `h`. Through `h` you can drive playback
+responses and returns the harness `h` and the script's sections
+(`yas.http`, `yas.segments`, ...). Through `h` you can drive playback
 (`h:set_time`, `h:press`, `h:fire`) and inspect the results (`h.requests`,
 `h.seeks`, `h:screen()`, `h:log_text()`, `h.props`).
 

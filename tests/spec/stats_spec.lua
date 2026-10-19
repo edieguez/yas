@@ -1,7 +1,7 @@
 local F = require("support.fixtures")
 
 local function time_saved(env, minutes)
-    for _, row in ipairs(env.format_user_stats({ overallStats = { minutesSaved = minutes } })) do
+    for _, row in ipairs(env.stats.format({ overallStats = { minutesSaved = minutes } })) do
         if row.label == "Time Saved" then return row.value end
     end
 end
@@ -15,7 +15,7 @@ end
 describe("format_user_stats", function()
     it("handles missing data", function()
         local _, env = F.boot({ no_file = true })
-        expect.eq(env.format_user_stats(nil)[1].text, "No user stats available")
+        expect.eq(env.stats.format(nil)[1].text, "No user stats available")
     end)
 
     it("formats durations in minutes and seconds, growing to hours, days, years", function()
@@ -32,7 +32,7 @@ describe("format_user_stats", function()
     it("lists only categories and action types with a count", function()
         local _, env = F.boot({ no_file = true })
         local labels = {}
-        for _, row in ipairs(env.format_user_stats(F.USER_STATS)) do
+        for _, row in ipairs(env.stats.format(F.USER_STATS)) do
             if row.label then labels[#labels + 1] = row.label .. "=" .. row.value end
         end
         expect.eq(labels, { "Time Saved=1d 1h 30s", "Segments Submitted=12",

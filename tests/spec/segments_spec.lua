@@ -77,7 +77,7 @@ describe("fetching segments", function()
         end } })
         h.manual_async = true
         h:fire("file-loaded")      -- slow first request
-        env.get_segments()         -- refresh, e.g. after a submission
+        env.segments.get()         -- refresh, e.g. after a submission
         -- deliver the refresh first, then the stale first reply
         local q = h.pending_async
         h.pending_async = { q[2], q[1] }
@@ -105,8 +105,8 @@ describe("fetching segments", function()
 
     it("does not stack observers when segments are fetched again", function()
         local h, env = F.boot({ segments = { F.SPONSOR } })
-        env.get_segments()
-        env.get_segments()
+        env.segments.get()
+        env.segments.get()
         h:flush_async()
         expect.eq(h:observer_count("time-pos"), 1)
     end)
@@ -130,7 +130,7 @@ describe("chapters", function()
 
     it("rebuilds from the original chapters on re-fetch instead of duplicating", function()
         local h, env = F.boot({ segments = { F.SPONSOR }, chapters = { { title = "Intro", time = 0 } } })
-        env.get_segments()
+        env.segments.get()
         h:flush_async()
         expect.eq(#h.props["chapter-list"], 3)
     end)

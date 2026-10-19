@@ -23,11 +23,11 @@ end)
 describe("error containment", function()
     it("logs an error in file-loaded and keeps handling later events", function()
         local h, env = F.boot({ no_file = true })
-        local real = env.http_request
-        env.http_request = function() error("boom") end
+        local real = env.http.request
+        env.http.request = function() error("boom") end
         expect.no_error(function() h:fire("file-loaded") end)
         expect.contains(h:log_text("error"), "unhandled error in file_loaded")
-        env.http_request = real
+        env.http.request = real
         h:fire("end-file")
         h:fire("file-loaded")
         expect.count(h:requests_to("GET", "/api/skipSegments"), 1)
@@ -35,7 +35,7 @@ describe("error containment", function()
 
     it("contains an error raised while skipping", function()
         local h, env = F.boot({ segments = { F.SPONSOR } })
-        env.report_skip = function() error("boom") end
+        env.segments.report_skip = function() error("boom") end
         expect.no_error(function() h:set_time(35) end)
         expect.eq(h.seeks, { 60.001 }, "the seek happens before the failing report")
         expect.contains(h:log_text("error"), "unhandled error in skip_ads")
@@ -43,7 +43,7 @@ describe("error containment", function()
 
     known_bug("M5", "contains an error raised inside a key binding", function()
         local h, env = F.boot()
-        env.http_request = function() error("boom") end
+        env.http.request = function() error("boom") end
         expect.no_error(function() h:press("z") end)
     end)
 end)
@@ -51,8 +51,8 @@ end)
 describe("toasts", function()
     it("cancels the previous toast's hide timer when a new one appears", function()
         local h, env = F.boot({ no_file = true })
-        env.show_toast("first")
-        env.show_toast("second")
+        env.ui.toast("first")
+        env.ui.toast("second")
         expect.truthy(h.timers[1].killed)
         expect.contains(h:screen(), "second")
         expect.not_contains(h:screen(), "first")
@@ -60,7 +60,7 @@ describe("toasts", function()
 
     it("disappears when its timer fires", function()
         local h, env = F.boot({ no_file = true })
-        env.show_toast("hello", "error", 5)
+        env.ui.toast("hello", "error", 5)
         expect.eq(h.timers[1].seconds, 5)
         h:run_timers()
         expect.eq(h:screen(), "")

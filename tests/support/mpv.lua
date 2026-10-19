@@ -1,8 +1,7 @@
 -- A fake mpv for running scripts/yas.lua outside the player.
 --
 -- Each test builds a fresh harness with mpv.new{...}, then h:load() runs
--- the script in its own environment, so locals and globals never leak
--- between tests. The harness records everything the script does through
+-- the script afresh, so no state leaks between tests. The harness records everything the script does through
 -- the mp API (requests, seeks, bindings, OSD text, logs) and lets the test
 -- drive it (fire events, move time-pos, press keys).
 --
@@ -390,18 +389,19 @@ function M.new(opts)
     -- Harness API used by the specs
     ----------------------------------------------------------------------------
 
-    -- Runs scripts/yas.lua in a fresh environment and returns that
-    -- environment (script globals such as detect_youtube_id live in it).
-    -- `extra` pre-seeds globals (e.g. a fake `os` with a fixed clock).
+    -- Runs scripts/yas.lua and returns its sections (the table the file
+    -- returns, which mpv ignores): yas.http, yas.segments, ... Tests may
+    -- replace a section function (yas.http.request = ...) since sections
+    -- call each other through these tables.
+    --
+    -- `extra` swaps globals (e.g. a fake `os` with a fixed clock) while the
+    -- script loads; it keeps the values it captured.
     function h:load(path, extra)
         path = path or SCRIPT
-        local env = setmetatable({ mp = self.mp }, { __index = _G })
-        for k, v in pairs(extra or {}) do env[k] = v end
-        env._G = env
-        package.loaded["mp.utils"] = nil
-        package.loaded["mp.options"] = nil
-        package.loaded["mp.assdraw"] = nil
-        package.loaded["mp.input"] = nil
+
+        for name in pairs(package.loaded) do
+            if name:match("^mp%.") then package.loaded[name] = nil end
+        end
         -- mp.input exists since mpv 0.38; opts.no_input simulates older mpv
         package.preload["mp.input"] = not opts.no_input and function()
             return {
@@ -412,16 +412,25 @@ function M.new(opts)
         package.preload["mp.utils"] = function() return self.utils end
         package.preload["mp.options"] = function() return self.options end
         package.preload["mp.assdraw"] = function() return self.assdraw end
-        local chunk
-        if setfenv then
-            chunk = assert(loadfile(path))
-            setfenv(chunk, env)
-        else
-            chunk = assert(loadfile(path, "t", env))
+
+        local globals = { mp = self.mp }
+        for k, v in pairs(extra or {}) do globals[k] = v end
+        local saved = {}
+        for k, v in pairs(globals) do
+            saved[k] = rawget(_G, k)
+            rawset(_G, k, v)
         end
-        chunk()
-        self.env = env
-        return env
+
+        local chunk, load_err = loadfile(path)
+        local ok, result = false, load_err
+        if chunk then ok, result = pcall(chunk) end
+
+        for k in pairs(globals) do rawset(_G, k, saved[k]) end
+        if not ok then error(result, 0) end
+
+        self.yas = result
+        self.env = result
+        return result
     end
 
     function h:fire(name, data)

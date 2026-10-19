@@ -383,7 +383,7 @@ describe("toast position", function()
     it("draws toasts in the bottom-right corner, prompts just above them", function()
         local h = F.boot({ segments = { F.SPONSOR }, conf = { user_id = F.USER_ID, unskip_window = "0" } })
         local env = h.env
-        env.show_toast("hello")
+        env.ui.toast("hello")
         local toast_x, toast_y
         for _, ov in ipairs(h.overlays) do
             if ov.data:find("hello", 1, true) then toast_x, toast_y = pos_of(ov.data) end

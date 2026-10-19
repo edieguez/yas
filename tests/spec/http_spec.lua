@@ -12,7 +12,7 @@ end
 local function request(h, env, ...)
     local got
     local args = { ... }
-    env.http_request(args[1], args[2], args[3], args[4], function(data, err, code)
+    env.http.request(args[1], args[2], args[3], args[4], function(data, err, code)
         got = { data = data, err = err, code = code }
     end)
     expect.is_nil(got, "callback must not run before the request finishes")
@@ -125,7 +125,7 @@ describe("http_request", function()
 
     it("contains an error raised inside the callback", function()
         local h, env = with_reply({ code = 200, body = "OK" })
-        env.http_request(API, "GET", nil, nil, function() error("boom") end)
+        env.http.request(API, "GET", nil, nil, function() error("boom") end)
         expect.no_error(function() h:flush_async() end)
         expect.contains(h:log_text("error"), "unhandled error in http callback")
     end)
