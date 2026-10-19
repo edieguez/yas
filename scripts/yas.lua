@@ -159,6 +159,46 @@ local function category_name(key)
     return ((key or "unknown"):gsub("^%l", string.upper):gsub("_", " "))
 end
 
+-- TIME FORMATTING (everything shown on screen goes through these two)
+
+-- A length of time: "45s" / "12.5s" under a minute, then "1m 5s",
+-- "1h 2m 3s", "1d 4h", "1y 2d"... Zero parts are left out.
+local function human_duration(seconds)
+    seconds = math.max(0, tonumber(seconds) or 0)
+    if seconds < 59.95 then
+        local tenths = math.floor(seconds * 10 + 0.5) / 10
+        if tenths == math.floor(tenths) then return ("%ds"):format(tenths) end
+        return ("%.1fs"):format(tenths)
+    end
+    local total = math.floor(seconds + 0.5)
+    local units = {
+        {"y", 365 * 86400}, {"d", 86400}, {"h", 3600}, {"m", 60}, {"s", 1}
+    }
+    local parts = {}
+    for _, unit in ipairs(units) do
+        local n = math.floor(total / unit[2])
+        total = total - n * unit[2]
+        if n > 0 then parts[#parts + 1] = n .. unit[1] end
+    end
+    return table.concat(parts, " ")
+end
+
+-- A position in the video, like a seekbar: "0:10.0", "12:34.2",
+-- "1:02:03.4". decimals: digits after the seconds (default 1; 0 = none).
+local function timestamp(seconds, decimals)
+    decimals = decimals or 1
+    local scale = 10 ^ decimals
+    seconds = math.floor(math.max(0, tonumber(seconds) or 0) * scale + 0.5) / scale
+    local h = math.floor(seconds / 3600)
+    local m = math.floor(seconds / 60) % 60
+    local sec = seconds - h * 3600 - math.floor(seconds / 60) % 60 * 60
+    local sec_text = decimals > 0
+        and ("%0" .. (3 + decimals) .. "." .. decimals .. "f"):format(sec)
+        or ("%02d"):format(sec)
+    if h > 0 then return ("%d:%02d:%s"):format(h, m, sec_text) end
+    return ("%d:%s"):format(m, sec_text)
+end
+
 -- Kept outside the git-tracked config tree, in the XDG state dir - same
 -- rationale and pattern as local_stats_path() below. Generated identity
 -- state doesn't belong in script-opts/yas.conf, which mp.options treats
@@ -816,7 +856,7 @@ local function offer_action(fn, seconds, text)
 end
 
 local function duration_text(segment)
-    return ("%s (%.1fs)"):format(category_name(segment.category), segment.end_time - segment.start_time)
+    return ("%s (%s)"):format(category_name(segment.category), human_duration(segment.end_time - segment.start_time))
 end
 
 -- Seeks past a segment, reports it and offers to undo.
@@ -868,14 +908,6 @@ local function show_skip_prompt(segment)
     end
 end
 
--- Formats seconds as m:ss or h:mm:ss
-local function clock(seconds)
-    seconds = math.floor(seconds + 0.5)
-    local h, m, sec = math.floor(seconds / 3600), math.floor(seconds / 60) % 60, seconds % 60
-    if h > 0 then return ("%d:%02d:%02d"):format(h, m, sec) end
-    return ("%d:%02d"):format(m, sec)
-end
-
 function jump_to_highlight()
     if not state.highlight then
         show_toast("This video has no highlight", "info", 2)
@@ -898,7 +930,7 @@ function offer_highlight()
     local at = state.highlight.start_time
     if pos < at - 1 then
         offer_action(jump_to_highlight, options.highlight_prompt_duration,
-            ("Highlight at %s · %s to jump"):format(clock(at), options.skip_key))
+            ("Highlight at %s · %s to jump"):format(timestamp(at, 0), options.skip_key))
     end
 end
 
@@ -1017,20 +1049,9 @@ end
 -- mp.unobserve_property everywhere - see safe_call() above.
 skip_ads_safe = safe_call(skip_ads, "skip_ads")
 
--- Formats a minutes value as "Nd Nh N.Nm" (omitting zero-value leading
--- components), matching the reference browser extension's getFormattedHours().
+-- Stats durations come in minutes from the API and the local tally
 local function format_duration(total_minutes)
-    total_minutes = math.floor((total_minutes or 0) * 10 + 0.5) / 10 -- round to 1 decimal
-    local years = math.floor(total_minutes / 525600)
-    local days = math.floor(total_minutes / 1440) % 365
-    local hours = math.floor(total_minutes / 60) % 24
-    local minutes = total_minutes % 60
-    local parts = {}
-    if years > 0 then table.insert(parts, years .. "y") end
-    if days > 0 then table.insert(parts, days .. "d") end
-    if hours > 0 then table.insert(parts, hours .. "h") end
-    table.insert(parts, ("%.1fm"):format(minutes))
-    return table.concat(parts, " ")
+    return human_duration((total_minutes or 0) * 60)
 end
 
 -- Returns a list of rows for show_stats_dialog(): each is either
@@ -1177,16 +1198,19 @@ local function measure_text(text)
     return w
 end
 
--- Draws a one-line rounded "pill" with `message` into overlay `ov`, with
--- its top-left corner at (PAD*2, y). kind picks the text color.
-local function render_pill(ov, message, kind, y)
+-- Draws a one-line rounded "pill" with `message` into overlay `ov`,
+-- right-aligned against the bottom-right corner. `row` 0 is the bottom
+-- line (toasts), row 1 the line above it (key prompts). kind picks the
+-- text color.
+local function render_pill(ov, message, kind, row)
     local style = TOAST_STYLE[kind or "info"] or TOAST_STYLE.info
     local full = style.icon .. message
 
     local width, height = get_virt_size()
     local max_w = width - PAD * 4
     local cw = math.min(measure_text(full), max_w)
-    local x = PAD * 2
+    local x = width - PAD * 2 - cw
+    local y = height - PAD * 2 - FONT_SIZE - row * (FONT_SIZE + PAD * 2)
 
     local ass = assdraw.ass_new()
 
@@ -1199,7 +1223,7 @@ local function render_pill(ov, message, kind, y)
     ass:round_rect_cw(-PAD, -tpad, cw + PAD, FONT_SIZE + tpad, CORNER, CORNER)
     ass:draw_stop()
 
-    local clip = ("\\clip(0,0,%d,%d)"):format(math.floor(x + cw), height)
+    local clip = ("\\clip(%d,0,%d,%d)"):format(math.floor(x), math.floor(x + cw), height)
     ass:new_event()
     ass:an(4)
     ass:pos(x, y + FONT_SIZE / 2)
@@ -1227,7 +1251,7 @@ function show_toast(message, kind, duration)
         overlays.toast_timer = nil
     end
 
-    render_pill(overlays.toast, message, kind, PAD * 2)
+    render_pill(overlays.toast, message, kind, 0)
 
     overlays.toast_timer = mp.add_timeout(duration, function()
         if overlays.toast then
@@ -1239,13 +1263,13 @@ function show_toast(message, kind, duration)
 end
 
 -- The action prompt ("ENTER to skip", "to undo", "to jump") gets its own
--- line under the toasts: it stays exactly as long as the key is bound and
+-- line just above the toasts: it stays exactly as long as the key is bound and
 -- can't be painted over by an unrelated toast.
 function show_action_prompt(message)
     if not overlays.action then
         overlays.action = mp.create_osd_overlay("ass-events")
     end
-    render_pill(overlays.action, message, "info", PAD * 4 + FONT_SIZE)
+    render_pill(overlays.action, message, "info", 1)
 end
 
 function hide_action_prompt()
@@ -1354,7 +1378,8 @@ function draw_segment_dialog(start_time, end_time, selected_index)
     end
 
     local width, height = get_virt_size()
-    local header = ("Submit segment: %.1f–%.1fs (%.1fs)"):format(start_time, end_time, end_time - start_time)
+    local header = ("Submit segment: %s → %s (%s)"):format(
+        timestamp(start_time), timestamp(end_time), human_duration(end_time - start_time))
     local footer = "↑/↓ Navigate   1–9 Jump   Enter Submit   Esc Cancel"
     local n = #segment_categories
     local focused_category = segment_categories[selected_index]
@@ -1792,7 +1817,7 @@ function toggle_segment_marking()
         segment_submission.start_time = current_time
         segment_submission.marking_segment = true
         hold_playback_open()
-        show_toast(string.format("Segment start marked at %.1f seconds", current_time), "info")
+        show_toast("Segment start marked at " .. timestamp(current_time), "info")
         mp.msg.info(string.format("📍 Segment start marked at %.1f seconds", current_time))
     else
         -- End marking and show dialog
@@ -1803,12 +1828,12 @@ function toggle_segment_marking()
 
         local duration = current_time - segment_submission.start_time
         if duration < 0.5 then
-            show_toast("Segment too short (minimum 0.5 seconds)", "error")
+            show_toast("Segment too short (minimum " .. human_duration(0.5) .. ")", "error")
             return
         end
 
         segment_submission.marking_segment = false
-        show_toast(string.format("Segment marked: %.1f - %.1f seconds", segment_submission.start_time, current_time), "info")
+        show_toast(("Segment marked: %s → %s"):format(timestamp(segment_submission.start_time), timestamp(current_time)), "info")
         mp.msg.info(string.format("🏁 Segment marked: %.1f - %.1f seconds", segment_submission.start_time, current_time))
 
         show_segment_dialog(segment_submission.start_time, current_time)

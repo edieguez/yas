@@ -10,7 +10,7 @@ describe("manual skip mode", function()
         local h = F.boot({ conf = conf, segments = { F.SPONSOR } })
         h:set_time(35)
         expect.count(h.seeks, 0)
-        expect.contains(h:screen(), "Sponsor (30.0s)")
+        expect.contains(h:screen(), "Sponsor (30s)")
         expect.contains(h:screen(), "ENTER to skip")
     end)
 
@@ -271,7 +271,7 @@ describe("prompts and other UI", function()
         h:set_time(10); h:press(";")
         h:set_time(20); h:press(";")     -- dialog open
         h:set_time(35)                    -- skip happens behind the dialog
-        expect.contains(h:osd_text(), "Skipped Sponsor (30.0s)")
+        expect.contains(h:osd_text(), "Skipped Sponsor (30s)")
         expect.not_contains(h:screen(), "to undo")
     end)
 
@@ -342,5 +342,63 @@ describe("prompts and other UI", function()
         expect.is_nil(h.input_prompt, "the prompt is closed with the file")
         prompt.submit("Setup")
         expect.count(h:requests_to("POST", "/api/skipSegments"), 0)
+    end)
+end)
+
+describe("time formatting", function()
+    it("shows short durations in seconds and longer ones in minutes and seconds", function()
+        local h = F.boot({ segments = {
+            F.segment("aaaaaa-short", "sponsor", 10, 22.5),
+            F.segment("bbbbbb-long", "outro", 300, 425),
+            F.segment("cccccc-hour", "filler", 1000, 4723),
+        }, duration = 6000, conf = { user_id = F.USER_ID, unskip_window = "0" } })
+        h:set_time(11)
+        expect.contains(h:osd_text(), "Skipped Sponsor (12.5s)")
+        h:set_time(301)
+        expect.contains(h:osd_text(), "Skipped Endcards/Credits (2m 5s)")
+        h:set_time(1001)
+        expect.contains(h:osd_text(), "Skipped Tangents/Jokes (1h 2m 3s)")
+    end)
+
+    it("shows positions in the video like a seekbar", function()
+        local h = F.boot({ duration = 6000 })
+        h:set_time(754.25); h:press(";")
+        h:set_time(3723.4); h:press(";")
+        expect.contains(h:osd_text(), "Segment start marked at 12:34.3")
+        expect.contains(h:screen(), "Submit segment: 12:34.3 → 1:02:03.4 (49m 29s)")
+    end)
+
+    it("shows the highlight time without decimals", function()
+        local h = F.boot({ segments = { F.segment("hhhhhh-hl", "poi_highlight", 3725.6, 3725.6, "poi") }, duration = 6000 })
+        expect.contains(h:screen(), "Highlight at 1:02:06")
+    end)
+end)
+
+describe("toast position", function()
+    local function pos_of(data)
+        local x, y = data:match("\\pos%(([%d%.%-]+),([%d%.%-]+)%)")
+        return tonumber(x), tonumber(y)
+    end
+
+    it("draws toasts in the bottom-right corner, prompts just above them", function()
+        local h = F.boot({ segments = { F.SPONSOR }, conf = { user_id = F.USER_ID, unskip_window = "0" } })
+        local env = h.env
+        env.show_toast("hello")
+        local toast_x, toast_y
+        for _, ov in ipairs(h.overlays) do
+            if ov.data:find("hello", 1, true) then toast_x, toast_y = pos_of(ov.data) end
+        end
+        expect.truthy(toast_x, "toast drawn")
+        -- virtual canvas is 1280x720 here; text width in the stub is 12 per character
+        expect.truthy(toast_x > 1280 / 2, "right half: x=" .. toast_x)
+        expect.truthy(toast_y > 720 * 0.8, "bottom: y=" .. toast_y)
+
+        local h2 = F.boot({ conf = { user_id = F.USER_ID, manual_skip_categories = "sponsor" }, segments = { F.SPONSOR } })
+        h2:set_time(35)
+        local prompt_y
+        for _, ov in ipairs(h2.overlays) do
+            if ov.data:find("to skip", 1, true) then _, prompt_y = pos_of(ov.data) end
+        end
+        expect.truthy(prompt_y and prompt_y < toast_y, "prompt line sits above the toast line")
     end)
 end)
