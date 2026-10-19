@@ -1,0 +1,108 @@
+local F = require("support.fixtures")
+
+local function chapter_titles(h)
+    local out = {}
+    for _, c in ipairs(h.props["chapter-list"]) do out[#out + 1] = ("%g %s"):format(c.time, c.title) end
+    return out
+end
+
+describe("fetching segments", function()
+    it("requests the video's segments with the default categories and action types", function()
+        local h = F.boot()
+        local reqs = h:requests_to("GET", "/api/skipSegments")
+        expect.count(reqs, 1)
+        expect.eq(reqs[1].params.videoID, F.VIDEO_ID)
+        expect.eq(reqs[1].params.categories,
+            '["sponsor","selfpromo","interaction","intro","outro","preview","hook","filler"]')
+        expect.eq(reqs[1].params.actionTypes, '["skip","mute"]')
+    end)
+
+    it("sends the categories configured in yas.conf", function()
+        local h = F.boot({ conf = { categories = "sponsor,intro", action_types = "skip" } })
+        local req = h:requests_to("GET", "/api/skipSegments")[1]
+        expect.eq(req.params.categories, '["sponsor","intro"]')
+        expect.eq(req.params.actionTypes, '["skip"]')
+    end)
+
+    known_bug("M4", "trims spaces in comma-separated option lists", function()
+        local h = F.boot({ conf = { categories = "sponsor, intro" } })
+        local req = h:requests_to("GET", "/api/skipSegments")[1]
+        expect.eq(req.params.categories, '["sponsor","intro"]')
+    end)
+
+    it("does nothing for files that aren't YouTube videos", function()
+        local h = F.boot({ path = "/videos/holiday.mp4" })
+        expect.count(h.requests, 0)
+        expect.eq(h:observer_count("time-pos"), 0)
+    end)
+
+    it("starts watching time-pos only when segments exist", function()
+        local h = F.boot({ segments = {} })
+        expect.eq(h:observer_count("time-pos"), 0)
+        expect.contains(h:log_text("info"), "no segments found")
+    end)
+
+    it("survives a failed request without watching time-pos", function()
+        local h = F.boot({ routes = { ["GET /api/skipSegments"] = { curl_status = 6 } } })
+        expect.eq(h:observer_count("time-pos"), 0)
+        expect.contains(h:log_text("warn"), "SponsorBlock API request failed")
+    end)
+
+    it("drops malformed segments and keeps valid ones", function()
+        local h = F.boot({ segments = {
+            { UUID = "x1", category = "sponsor", segment = { 10 }, actionType = "skip" },
+            { UUID = "", category = "sponsor", segment = { 10, 20 }, actionType = "skip" },
+            { UUID = "x3", category = "sponsor", segment = { 50, 40 }, actionType = "skip" },
+            { UUID = "x4", segment = { 1, 2 }, actionType = "skip" },
+            F.SPONSOR,
+        } })
+        expect.eq(#h.props["chapter-list"], 2, "one valid segment = two chapter marks")
+        expect.contains(h:log_text("warn"), "malformed")
+    end)
+
+    it("does not stack observers when segments are fetched again", function()
+        local h, env = F.boot({ segments = { F.SPONSOR } })
+        env.get_segments()
+        env.get_segments()
+        expect.eq(h:observer_count("time-pos"), 1)
+    end)
+end)
+
+describe("chapters", function()
+    it("merges segment chapters with the video's own, in time order", function()
+        local h = F.boot({
+            segments = { F.SPONSOR, F.MUTE },
+            chapters = { { title = "Intro", time = 0 }, { title = "Main", time = 80 } },
+        })
+        expect.eq(chapter_titles(h), {
+            "0 Intro",
+            "30 Sponsor (aaaaaa)",
+            "60 ",
+            "80 Main",
+            "100 Selfpromo [Mute] (bbbbbb)",
+            "120 ",
+        })
+    end)
+
+    it("rebuilds from the original chapters on re-fetch instead of duplicating", function()
+        local h, env = F.boot({ segments = { F.SPONSOR }, chapters = { { title = "Intro", time = 0 } } })
+        env.get_segments()
+        expect.eq(#h.props["chapter-list"], 3)
+    end)
+
+    it("clamps marks that fall past the end of the video", function()
+        local h = F.boot({ duration = 600, segments = { F.segment("cccccc-outro", "outro", 590, 700) } })
+        local last = h.props["chapter-list"][2]
+        expect.eq(last.time, 599.999)
+    end)
+
+    it("turns underscores in category names into spaces", function()
+        local h = F.boot({ segments = { F.segment("dddddd-music", "music_offtopic", 5, 9) } })
+        expect.eq(h.props["chapter-list"][1].title, "Music offtopic (dddddd)")
+    end)
+
+    known_bug("L2", "keeps the video's chapter name after a segment ends", function()
+        local h = F.boot({ segments = { F.SPONSOR }, chapters = { { title = "Intro", time = 0 } } })
+        expect.eq(h.props["chapter-list"][3].title, "Intro")
+    end)
+end)
