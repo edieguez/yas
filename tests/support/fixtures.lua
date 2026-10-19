@@ -36,6 +36,8 @@ function F.routes(opts)
             local seg = req.json and req.json.segments and req.json.segments[1] or {}
             return { code = 200, body = { { UUID = "new-uuid", category = seg.category, segment = seg.segment } } }
         end,
+        -- Documented as "Response: Nothing, status code 200".
+        ["POST /api/voteOnSponsorTime"] = { code = 200, body = "" },
         ["GET /api/userStats"] = { code = 200, body = F.USER_STATS },
         ["GET /api/userInfo"] = { code = 200, body = { viewCount = 345 } },
     }

@@ -42,8 +42,17 @@ local function to_string(v, seen)
 end
 
 -- Parses a curl argument vector into {method, url, path, params, headers, body, args}.
+-- curl's name@file / @file syntax: the value is read from a file.
+local function read_file(path)
+    local f = io.open(path, "rb")
+    if not f then error("curl stub: cannot read " .. path) end
+    local s = f:read("*a")
+    f:close()
+    return s
+end
+
 local function parse_curl(args)
-    local req = { method = nil, params = {}, headers = {}, args = args, flags = {} }
+    local req = { method = nil, params = {}, headers = {}, args = args, flags = {}, files = {} }
     local i = 2
     while i <= #args do
         local a = args[i]
@@ -53,11 +62,26 @@ local function parse_curl(args)
             i = i + 1
             local k, v = args[i]:match("^([^:]+):%s*(.*)$")
             if k then req.headers[k:lower()] = v end
-        elseif a == "--data" or a == "-d" or a == "--data-raw" then i = i + 1; req.body = args[i]
-        elseif a == "--data-urlencode" then
+        elseif a == "--data" or a == "-d" or a == "--data-raw" then
             i = i + 1
-            local k, v = args[i]:match("^([^=]+)=(.*)$")
-            if k then req.params[k] = v end
+            req.body = args[i]
+            if a ~= "--data-raw" and req.body:sub(1, 1) == "@" then
+                req.files[#req.files + 1] = req.body:sub(2)
+                req.body = read_file(req.body:sub(2))
+            end
+        elseif a == "--data-urlencode" or a == "--url-query" then
+            req.flags[a] = true
+            i = i + 1
+            local k, v = args[i]:match("^([^=@]+)=(.*)$")
+            if k then
+                req.params[k] = v
+            else
+                local fk, path = args[i]:match("^([^=@]+)@(.+)$")
+                if fk then
+                    req.files[#req.files + 1] = path
+                    req.params[fk] = read_file(path)
+                end
+            end
         elseif a == "--max-time" or a == "-m" or a == "--connect-timeout"
             or a == "--user-agent" or a == "-A" or a == "--write-out" or a == "-w" then
             i = i + 1
@@ -242,16 +266,27 @@ function M.new(opts)
             table.insert(h.requests, req)
             local reply = h.http and h.http(req)
             return curl_result(req, reply)
-        elseif args[1] == "mkdir" then
-            local cmd = "mkdir"
+        elseif args[1] == "mkdir" or args[1] == "chmod" then
+            local cmd = args[1]
             for i = 2, #args do cmd = cmd .. " " .. shell_quote(args[i]) end
             local ok = os.execute(cmd)
             return { status = (ok == 0 or ok == true) and 0 or 1, stdout = "" }
         end
-        error("unexpected subprocess: " .. table.concat(args, " "))
+        -- mpv reports a program it can't start as success=true with a
+        -- negative status, not as a failed command
+        return { status = -3, error_string = "init", stdout = "" }
+    end
+
+    -- Real mpv dumps every command it runs at debug level (player/command.c,
+    -- mp_cmd_dump) - so a --log-file sees subprocess arguments verbatim.
+    local function dump(t)
+        local parts = {}
+        for _, a in ipairs(t.args or t) do parts[#parts + 1] = tostring(a) end
+        log("debug")("Run command: " .. table.concat(parts, " "))
     end
 
     function mp.command_native(t, def)
+        dump(t)
         if t[1] == "expand-path" then return expand(t[2]) end
         if t.name == "subprocess" then return subprocess(t) end
         table.insert(h.commands, t)
@@ -383,8 +418,11 @@ function M.new(opts)
 
     function h:fire(name, data)
         for _, fn in ipairs(self.events[name] or {}) do fn(data or { event = name }) end
-        self:flush_async()
+        if not self.manual_async then self:flush_async() end
     end
+
+    -- Set h.manual_async = true to keep requests "in flight" until the
+    -- test calls h:flush_async() itself (e.g. to change files meanwhile).
 
     -- Delivers queued command_native_async callbacks (repeatedly, since a
     -- callback may start another request).
@@ -405,7 +443,7 @@ function M.new(opts)
         for _, o in ipairs(self.observers) do
             if o.name == "time-pos" then o.fn("time-pos", t) end
         end
-        self:flush_async()
+        if not self.manual_async then self:flush_async() end
     end
 
     function h:observer_count(name)
@@ -422,7 +460,7 @@ function M.new(opts)
         end
         assert(hit, "no binding for key " .. key)
         hit.fn()
-        self:flush_async()
+        if not self.manual_async then self:flush_async() end
     end
 
     function h:has_binding(key)

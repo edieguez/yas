@@ -32,6 +32,15 @@ describe("skipping", function()
         expect.count(h:requests_to("POST", "/api/viewedVideoSponsorTime"), 2)
     end)
 
+    it("skips immediately without waiting for the report to finish", function()
+        local h = F.boot({ segments = { F.SPONSOR } })
+        h.manual_async = true
+        h:set_time(35)
+        expect.eq(h.seeks, { 60.001 })
+        h:set_time(36) -- report still in flight: don't send a duplicate
+        expect.count(h:requests_to("POST", "/api/viewedVideoSponsorTime"), 1)
+    end)
+
     it("records the skip in the local stats file", function()
         local h = F.boot({ segments = { F.SPONSOR } })
         h:set_time(35)

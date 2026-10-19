@@ -42,6 +42,48 @@ describe("fetching segments", function()
         expect.contains(h:log_text("info"), "no segments found")
     end)
 
+    it("treats a 404 as 'no segments', not as an error", function()
+        local h = F.boot({ routes = { ["GET /api/skipSegments"] = { code = 404, body = "Not Found" } } })
+        expect.eq(h:observer_count("time-pos"), 0)
+        expect.contains(h:log_text("info"), "no segments found")
+        expect.eq(h:log_text("warn"), "", "a 404 is routine, not a warning")
+    end)
+
+    it("ignores segments that arrive after the file changed", function()
+        local h = F.boot({ segments = { F.SPONSOR }, no_file = true })
+        h.manual_async = true
+        h:fire("file-loaded")
+        h:fire("end-file")
+        h:flush_async()
+        expect.eq(h:observer_count("time-pos"), 0)
+        expect.eq(#h.props["chapter-list"], 0)
+    end)
+
+    it("doesn't block: segments apply only once the response arrives", function()
+        local h = F.boot({ segments = { F.SPONSOR }, no_file = true })
+        h.manual_async = true
+        h:fire("file-loaded")
+        expect.eq(h:observer_count("time-pos"), 0)
+        h:flush_async()
+        expect.eq(h:observer_count("time-pos"), 1)
+    end)
+
+    it("applies only the newest reply when requests overlap", function()
+        local calls = 0
+        local h, env = F.boot({ no_file = true, routes = { ["GET /api/skipSegments"] = function()
+            calls = calls + 1
+            return { code = 200, body = calls == 1 and { F.SPONSOR } or { F.SPONSOR, F.MUTE } }
+        end } })
+        h.manual_async = true
+        h:fire("file-loaded")      -- slow first request
+        env.get_segments()         -- refresh, e.g. after a submission
+        -- deliver the refresh first, then the stale first reply
+        local q = h.pending_async
+        h.pending_async = { q[2], q[1] }
+        h:flush_async()
+        expect.eq(#h.props["chapter-list"], 4, "both segments from the newest reply")
+    end)
+
     it("survives a failed request without watching time-pos", function()
         local h = F.boot({ routes = { ["GET /api/skipSegments"] = { curl_status = 6 } } })
         expect.eq(h:observer_count("time-pos"), 0)
@@ -64,6 +106,7 @@ describe("fetching segments", function()
         local h, env = F.boot({ segments = { F.SPONSOR } })
         env.get_segments()
         env.get_segments()
+        h:flush_async()
         expect.eq(h:observer_count("time-pos"), 1)
     end)
 end)
@@ -87,6 +130,7 @@ describe("chapters", function()
     it("rebuilds from the original chapters on re-fetch instead of duplicating", function()
         local h, env = F.boot({ segments = { F.SPONSOR }, chapters = { { title = "Intro", time = 0 } } })
         env.get_segments()
+        h:flush_async()
         expect.eq(#h.props["chapter-list"], 3)
     end)
 

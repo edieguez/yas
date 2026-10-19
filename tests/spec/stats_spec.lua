@@ -52,6 +52,27 @@ describe("stats panel (z)", function()
         expect.contains(screen, "You've skipped 0 segments")
     end)
 
+    it("shows a loading toast and ignores z until the stats arrive", function()
+        local h = F.boot()
+        h.manual_async = true
+        h:press("z")
+        expect.contains(h:screen(), "Loading SponsorBlock stats…")
+        h:press("z")
+        h:flush_async()
+        expect.count(h:requests_to("GET", "/api/userStats"), 1)
+        expect.contains(h:screen(), "SponsorBlock user stats for tester")
+        expect.not_contains(h:screen(), "Loading")
+    end)
+
+    it("doesn't open the panel over the next file if it changed while loading", function()
+        local h = F.boot()
+        h.manual_async = true
+        h:press("z")
+        h:fire("end-file")
+        h:flush_async()
+        expect.not_contains(h:screen(), "SponsorBlock user stats")
+    end)
+
     it("toggles closed on the second press", function()
         local h = F.boot()
         h:press("z")

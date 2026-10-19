@@ -24,13 +24,22 @@ local options = {
 }
 
 -- VARIABLES AND STATE
--- Endpoint variables
-local endpoints = {
-    skip_segments = ("%s/api/skipSegments"):format(options.server_address),
-    viewed_video_sponsor_time = ("%s/api/viewedVideoSponsorTime"):format(options.server_address),
-    user_stats = ("%s/api/userStats"):format(options.server_address),
-    user_info = ("%s/api/userInfo"):format(options.server_address)
-}
+-- Endpoint URLs. Filled by build_endpoints() once yas.conf has been read,
+-- so a server_address override actually takes effect.
+local endpoints = {}
+
+local function build_endpoints()
+    local base = options.server_address:gsub("/+$", "")
+    endpoints.skip_segments = base .. "/api/skipSegments"
+    endpoints.viewed_video_sponsor_time = base .. "/api/viewedVideoSponsorTime"
+    endpoints.user_stats = base .. "/api/userStats"
+    endpoints.user_info = base .. "/api/userInfo"
+end
+
+-- curl limits, in seconds: a stalled server must never leave a request
+-- (and the callbacks waiting on it) hanging indefinitely.
+local CONNECT_TIMEOUT = 5
+local MAX_TIME = 10
 
 -- State variables
 local state = {
@@ -38,6 +47,7 @@ local state = {
     youtube_id = nil,
     has_valid_user_id = false,
     base_chapters = nil, -- video's own chapters, captured once, before SponsorBlock ones are added
+    file_generation = 0, -- bumped on every end-file; async replies for older files are dropped
     active_mute_segment = nil, -- the "mute" segment currently muting audio, if any
     mute_before_segment = false -- mute state to restore once active_mute_segment ends
 }
@@ -73,6 +83,7 @@ local overlays = {
 
 -- UI state
 local stats_visible = false
+local stats_loading = false -- a stats fetch is in flight; ignore repeat z presses
 
 -- Segment Categories for submission dialog
 local segment_categories = {
@@ -106,27 +117,32 @@ local function load_generated_user_id()
     if not path then return nil end
     local f = io.open(path, "r")
     if not f then return nil end
-    local id = f:read("l")
+    local id = f:read("*l") -- "*l", not "l": PUC Lua 5.1 rejects the short form
     f:close()
     if id then id = id:match("^%s*(.-)%s*$") end -- trim
     return id
 end
 
--- Persists a freshly generated user_id to local_user_id_path().
-local function persist_generated_user_id(user_id)
-    local path = local_user_id_path()
-    if not path then
-        mp.msg.warn("⚠️ Could not resolve yas_user_id path; generated userID won't persist")
-        return
-    end
+-- Makes `path` readable and writable by its owner only. Best effort:
+-- chmod doesn't exist on Windows, and failing here must not stop the script.
+local function chmod_private(path)
+    pcall(mp.command_native, {
+        name = "subprocess",
+        args = {"chmod", "600", path},
+        playback_only = false
+    })
+end
 
+-- Writes `content` to `path` so it is never readable by other users, not
+-- even briefly: the file is created empty, restricted, and only then
+-- filled (truncating keeps the mode). Creates the parent directory if
+-- needed. Returns true on success.
+local function write_private_file(path, content)
     local out, err = io.open(path, "w")
     if not out then
         -- io.open(path, "w") does not create missing parent directories
-        -- on its own, so a fresh install/machine would otherwise
-        -- silently never persist the generated ID. Only shell out to
-        -- mkdir -p here, in this rare fallback path (once, on actual
-        -- write failure), not proactively on every script load.
+        -- on its own. Only shell out to mkdir -p in this rare fallback
+        -- path (on actual write failure), not on every script load.
         pcall(function()
             local dir = utils.split_path(path) -- split_path returns (dir, filename); only dir wanted here
             mp.command_native({
@@ -137,12 +153,28 @@ local function persist_generated_user_id(user_id)
         end)
         out, err = io.open(path, "w")
     end
-    if not out then
+    if not out then return false, err end
+    out:close()
+    chmod_private(path)
+    out, err = io.open(path, "w")
+    if not out then return false, err end
+    out:write(content)
+    out:close()
+    return true
+end
+
+-- Persists a freshly generated user_id to local_user_id_path().
+local function persist_generated_user_id(user_id)
+    local path = local_user_id_path()
+    if not path then
+        mp.msg.warn("⚠️ Could not resolve yas_user_id path; generated userID won't persist")
+        return
+    end
+    local ok, err = write_private_file(path, user_id .. "\n")
+    if not ok then
         mp.msg.warn("⚠️ Could not write " .. path .. " to persist generated userID: " .. tostring(err))
         return
     end
-    out:write(user_id .. "\n")
-    out:close()
     mp.msg.info("💾 Saved generated userID to " .. path)
 end
 
@@ -224,9 +256,58 @@ end
 
 load_local_stats()
 
+-- The private userID is SponsorBlock's only credential (there are no
+-- passwords), so it must never reach the terminal or a --log-file.
+-- Diagnostics use this masked form instead.
+local function mask_user_id(id)
+    if type(id) ~= "string" or #id < 12 then return "<hidden>" end
+    return id:sub(1, 4) .. "…" .. id:sub(-4)
+end
+
+-- Replaces every occurrence of the private userID in `text` (log lines,
+-- curl command lines, JSON bodies) with its masked form.
+local function redact(text)
+    local id = options.user_id
+    if type(text) ~= "string" or type(id) ~= "string" or id == "" then return text end
+    local escaped = id:gsub("%p", "%%%0")
+    return (text:gsub(escaped, mask_user_id(id)))
+end
+
+-- Generates a 32-character alphanumeric userID. Prefers the OS CSPRNG;
+-- falls back to math.random seeded from several sources, so two installs
+-- started in the same second still get different IDs.
+local function generate_user_id()
+    local chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+    local out = {}
+    local f = io.open("/dev/urandom", "rb")
+    if f then
+        local bytes = f:read(64)
+        f:close()
+        if bytes and #bytes == 64 then
+            -- Rejection sampling: 248 = 4 * 62, keeps the distribution uniform
+            for i = 1, #bytes do
+                local b = bytes:byte(i)
+                if b < 248 then
+                    local n = b % #chars + 1
+                    out[#out + 1] = chars:sub(n, n)
+                    if #out == 32 then return table.concat(out) end
+                end
+            end
+        end
+    end
+    local addr = tonumber(tostring({}):match("0x(%x+)") or "0", 16) or 0
+    math.randomseed((os.time() + math.floor(os.clock() * 1e6) + addr) % 2147483647)
+    for i = #out + 1, 32 do
+        local n = math.random(1, #chars)
+        out[i] = chars:sub(n, n)
+    end
+    return table.concat(out)
+end
+
 -- INITIALIZATION
 -- Load options from config file: script-opts/yas.conf
 mpoptions.read_options(options, "yas")
+build_endpoints()
 
 -- Resolve userID: a manual override in yas.conf wins; otherwise reuse a
 -- previously generated one from the state dir; otherwise generate and
@@ -235,19 +316,32 @@ if not options.user_id or #options.user_id < 30 then
     local existing_id = load_generated_user_id()
     if existing_id and #existing_id >= 30 then
         options.user_id = existing_id
-        mp.msg.info("🆔 Reusing previously generated local userID: " .. options.user_id)
+        -- Files written by older versions were created world-readable
+        chmod_private(local_user_id_path())
+        mp.msg.info("🆔 Reusing previously generated local userID " .. mask_user_id(options.user_id))
     else
-        -- Generate a random 32-character userID for submissions
-        local chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
-        local user_id = ""
-        math.randomseed(os.time())
-        for i = 1, 32 do
-            local rand = math.random(1, #chars)
-            user_id = user_id .. string.sub(chars, rand, rand)
-        end
+        local user_id = generate_user_id()
         options.user_id = user_id
-        mp.msg.info("🆔 Generated new local userID for submissions: " .. options.user_id)
+        mp.msg.info("🆔 Generated new local userID for submissions " .. mask_user_id(user_id))
         persist_generated_user_id(user_id)
+    end
+end
+
+-- The userID must never appear on curl's command line: mpv logs every
+-- subprocess command at debug level (so --log-file captures it), and any
+-- local user can read a process's arguments with ps. Instead it's kept in
+-- an owner-only file that curl reads itself (name@file / --data @file).
+-- If that file can't be written, requests fall back to passing it inline.
+local USER_ID = setmetatable({}, { __tostring = function() return "<userID>" end })
+local secret_path = nil
+do
+    local ok, path = pcall(mp.command_native, {"expand-path", "~/.local/state/mpv/yas_secret"})
+    if ok and path and path ~= "" and options.user_id and options.user_id ~= "" then
+        if write_private_file(path, options.user_id) then
+            secret_path = path
+        else
+            mp.msg.warn("⚠️ Could not write " .. path .. "; the userID will be passed on curl's command line")
+        end
     end
 end
 
@@ -268,9 +362,96 @@ local function safe_call(fn, name)
     end
 end
 
-function http_request(url, method, query_params, json_body)
-    local curl_cmd = { "curl", "--location", "--silent" }
+-- Friendly names for the curl exit codes users actually hit.
+local CURL_ERRORS = {
+    [6] = "couldn't resolve host",
+    [7] = "couldn't connect to server",
+    [28] = "request timed out",
+    [35] = "TLS handshake failed",
+}
+
+-- Turns a finished curl subprocess into (data, error, http_code).
+-- curl runs with --write-out "\n%{http_code}", so the status code is the
+-- last line of stdout. Any non-2xx status is an error carrying the
+-- server's own (usually actionable) message: SponsorBlock answers bad
+-- submissions with plain-text 400/403/409/429 bodies.
+local function parse_http_result(success, result, error_string)
+    if not success or not result then
+        return nil, "curl could not be run: " .. tostring(error_string or "unknown error")
+    end
+    if result.status < 0 then
+        -- mpv couldn't start curl at all (e.g. not installed)
+        return nil, ("curl could not be started (%s)"):format(tostring(result.error_string or result.status))
+    end
+    if result.status ~= 0 then
+        local reason = CURL_ERRORS[result.status]
+        return nil, ("curl failed with status %s%s"):format(
+            tostring(result.status), reason and (" (" .. reason .. ")") or "")
+    end
+
+    local stdout = result.stdout or ""
+    local body, code = stdout:match("^(.*)\n(%d%d%d)$")
+    if not code then
+        return nil, "No HTTP status in curl output"
+    end
+    code = tonumber(code)
+
+    if code < 200 or code > 299 then
+        local message = body:gsub("^%s+", ""):gsub("%s+$", ""):sub(1, 160)
+        return nil, ("HTTP %d%s"):format(code, message ~= "" and (": " .. message) or ""), code
+    end
+
+    -- Parse JSON if the body looks like JSON; anything else (e.g. the
+    -- "OK" acknowledgement of viewedVideoSponsorTime) is returned as text.
+    if body:match("^%s*[%[%{]") then
+        local data = utils.parse_json(body)
+        if data == nil then
+            return nil, "Invalid JSON response", code
+        end
+        return data, nil, code
+    end
+    return body, nil, code
+end
+
+-- Counter for temporary request-body files
+local body_file_seq = 0
+
+-- Adds one parameter to a curl command. GET parameters go in the query
+-- string via --get/--data-urlencode; for POST they're appended to the URL
+-- with --url-query (curl 7.87+) so the body stays free. The USER_ID
+-- sentinel is read by curl from the owner-only secret file.
+local function add_param(curl_cmd, method, key, value)
+    local flag = method == "GET" and "--data-urlencode" or "--url-query"
+    table.insert(curl_cmd, flag)
+    if value == USER_ID then
+        if secret_path then
+            table.insert(curl_cmd, key .. "@" .. secret_path)
+            return
+        end
+        value = options.user_id
+    end
+    -- tostring() because PUC Lua 5.1's %s rejects booleans (fetchCategoryStats = true)
+    table.insert(curl_cmd, ("%s=%s"):format(key, tostring(value)))
+end
+
+-- Runs an HTTP request with curl WITHOUT blocking mpv: the subprocess runs
+-- asynchronously and callback(data, error, http_code) is called when it
+-- finishes. The callback is wrapped in safe_call, so an error inside it is
+-- logged instead of killing the script's event loop.
+--   query_params: table of parameters; use the USER_ID sentinel as a value
+--                 to send the private userID without exposing it.
+--   json_body:    string. If it contains the userID it is passed to curl
+--                 through a temporary owner-only file, never inline.
+function http_request(url, method, query_params, json_body, callback)
     method = method or "GET"
+    callback = callback or function() end
+
+    local curl_cmd = {
+        "curl", "--location", "--silent",
+        "--connect-timeout", tostring(CONNECT_TIMEOUT),
+        "--max-time", tostring(MAX_TIME),
+        "--write-out", "\n%{http_code}",
+    }
 
     if method == "GET" then
         table.insert(curl_cmd, "--get")
@@ -281,65 +462,53 @@ function http_request(url, method, query_params, json_body)
 
     table.insert(curl_cmd, url)
 
-    -- Handle JSON body for POST requests
+    local body_file = nil
     if json_body then
         table.insert(curl_cmd, "--header")
         table.insert(curl_cmd, "Content-Type: application/json")
         table.insert(curl_cmd, "--data")
-        table.insert(curl_cmd, json_body)
-    elseif query_params then
-        -- Handle URL parameters for GET requests
-        for key, value in pairs(query_params) do
-            table.insert(curl_cmd, "--data-urlencode")
-            table.insert(curl_cmd, ("%s=%s"):format(key, value))
+        if secret_path and options.user_id and json_body:find(options.user_id, 1, true) then
+            body_file_seq = body_file_seq + 1
+            body_file = ("%s.body%d.json"):format(secret_path, body_file_seq)
+            if write_private_file(body_file, json_body) then
+                table.insert(curl_cmd, "@" .. body_file)
+            else
+                body_file = nil
+                table.insert(curl_cmd, json_body)
+            end
+        else
+            table.insert(curl_cmd, json_body)
         end
     end
+    if query_params then
+        -- Sorted so commands (and logs) are deterministic
+        local keys = {}
+        for key in pairs(query_params) do keys[#keys + 1] = key end
+        table.sort(keys)
+        for _, key in ipairs(keys) do add_param(curl_cmd, method, key, query_params[key]) end
+    end
 
-    mp.msg.debug("🐚 curl command: " .. table.concat(curl_cmd, " "))
+    mp.msg.debug("🐚 curl command: " .. redact(table.concat(curl_cmd, " ")))
 
-    local result = mp.command_native{
+    local done = safe_call(function(success, result, error_string)
+        if body_file then os.remove(body_file) end
+        local data, err, code = parse_http_result(success, result, error_string)
+        if err and code ~= 404 then -- 404 is routine ("no segments"); callers decide
+            mp.msg.warn(("❌ HTTP %s %s failed: %s"):format(method, url, err))
+        elseif err then
+            mp.msg.debug(("HTTP %s %s: %s"):format(method, url, err))
+        else
+            mp.msg.debug("✅ HTTP request succeeded")
+        end
+        callback(data, err, code)
+    end, "http callback")
+
+    mp.command_native_async({
         name = "subprocess",
         capture_stdout = true,
         playback_only = false,
         args = curl_cmd
-    }
-
-    -- Centralized error handling
-    if not result then
-        mp.msg.warn("❌ HTTP request failed: no result from curl")
-        return nil, "No result from curl"
-    end
-
-    if result.status ~= 0 then
-        mp.msg.warn("❌ HTTP request failed: curl status " .. tostring(result.status))
-        return nil, "Curl failed with status " .. tostring(result.status)
-    end
-
-    if not result.stdout or result.stdout == "" then
-        mp.msg.warn("❌ HTTP request failed: empty response")
-        return nil, "Empty response"
-    end
-
-    if result.stdout == "Not Found" then
-        mp.msg.warn("🚫 HTTP request failed: 404 Not Found")
-        return nil, "404 Not Found"
-    end
-
-    -- Try to parse JSON if response looks like JSON
-    local data = nil
-    if result.stdout:match("^%s*[%[%{]") then -- Check if starts with [ or {
-        data = utils.parse_json(result.stdout)
-        if not data then
-            mp.msg.warn("❌ HTTP request failed: invalid JSON response")
-            return nil, "Invalid JSON response"
-        end
-    else
-        -- For non-JSON responses (like simple POST acknowledgments)
-        data = result.stdout
-    end
-
-    mp.msg.debug("✅ HTTP request succeeded")
-    return data, nil
+    }, done)
 end
 
 -- Detect YouTube video ID from multiple sources
@@ -367,6 +536,9 @@ function detect_youtube_id()
 end
 
 -- CORE SPONSORBLOCK FUNCTIONALITY
+-- Bumped by every get_segments() call; only the newest reply is applied
+local segments_request_seq = 0
+
 -- Fetch sponsorblock segments from API
 function get_segments()
     if not state.youtube_id then
@@ -374,15 +546,44 @@ function get_segments()
         return
     end
     mp.msg.info("🌐 Fetching SponsorBlock segments for video: " .. state.youtube_id)
-    local data, error_msg = http_request(endpoints.skip_segments, "GET", {
+    -- The answer arrives asynchronously: by then the user may have moved
+    -- on to another file. Only apply it to the file that asked for it.
+    local generation = state.file_generation
+    segments_request_seq = segments_request_seq + 1
+    local seq = segments_request_seq
+    http_request(endpoints.skip_segments, "GET", {
         categories = ("[%s]"):format(options.categories),
         actionTypes = ("[%s]"):format(options.action_types),
         videoID = state.youtube_id
-    })
-    if not data then
-        mp.msg.warn("❌ SponsorBlock API request failed: " .. (error_msg or "unknown error"))
-        return
-    end
+    }, nil, function(data, error_msg, code)
+        if generation ~= state.file_generation then
+            mp.msg.debug("⏭️ Ignoring segments for a file that is no longer playing")
+            return
+        end
+        if seq ~= segments_request_seq then
+            mp.msg.debug("⏭️ Ignoring segments superseded by a newer request")
+            return
+        end
+        if code == 404 then
+            -- SponsorBlock's way of saying "this video has no segments"
+            mp.msg.info("ℹ️ SponsorBlock: no segments found")
+            return
+        end
+        if not data then
+            mp.msg.warn("❌ SponsorBlock API request failed: " .. (error_msg or "unknown error"))
+            return
+        end
+        if type(data) ~= "table" then
+            mp.msg.warn("❌ SponsorBlock API request failed: unexpected response " .. tostring(data))
+            return
+        end
+        apply_segments(data)
+    end)
+end
+
+-- Turns the API's segment list into state.segments, chapters and the
+-- time-pos observer that skips/mutes them.
+function apply_segments(data)
     state.segments = {}
     for _, seg in ipairs(data) do
         -- Trust nothing from the API beyond "looks like a segment": a
@@ -453,15 +654,21 @@ function create_chapters()
     mp.msg.debug("📚 Updated chapter-list: " .. utils.to_string(chapters))
 end
 
+-- Fire-and-forget: tells SponsorBlock a segment was skipped. Runs in the
+-- background so the skip itself is never delayed by the network.
 function report_skip(segment)
-    if not segment or segment.skip_reported then return end
-    local data, error_msg = http_request(("%s?UUID=%s"):format(endpoints.viewed_video_sponsor_time, segment.uuid), "POST")
-    if data then
-        mp.msg.info("✅ Reported skip for segment " .. segment.short_uuid)
-        segment.skip_reported = true
-    else
-        mp.msg.warn("❌ Failed to report skip for segment " .. segment.short_uuid .. ": " .. (error_msg or "unknown error"))
-    end
+    if not segment or segment.skip_reported or segment.report_pending then return end
+    segment.report_pending = true
+    http_request(endpoints.viewed_video_sponsor_time, "POST", { UUID = segment.uuid }, nil,
+        function(data, error_msg)
+            segment.report_pending = false
+            if data then
+                mp.msg.info("✅ Reported skip for segment " .. segment.short_uuid)
+                segment.skip_reported = true
+            else
+                mp.msg.warn("❌ Failed to report skip for segment " .. segment.short_uuid .. ": " .. (error_msg or "unknown error"))
+            end
+        end)
 end
 
 -- Skip segments automatically
@@ -926,48 +1133,68 @@ function get_user_stats()
         return
     end
 
-    -- Need to fetch new data (either no cache or cache expired)
-    mp.msg.info("🌐 Fetching user stats for userID: " .. options.user_id)
-    local data, error_msg = http_request(endpoints.user_stats, "GET", {
-        userID = options.user_id,
+    -- Need to fetch new data (either no cache or cache expired). Both
+    -- requests run in the background; the panel opens when they finish.
+    if stats_loading then return end
+    stats_loading = true
+    local generation = state.file_generation
+    show_toast("Loading SponsorBlock stats…", "info", MAX_TIME * 2)
+    mp.msg.info("🌐 Fetching user stats for userID " .. mask_user_id(options.user_id))
+
+    local function display(data)
+        stats_loading = false
+        if overlays.toast_timer then -- drop the "Loading…" toast
+            overlays.toast_timer:kill()
+            overlays.toast_timer = nil
+            overlays.toast.data = ""
+            overlays.toast:update()
+        end
+        -- The file changed while loading: keep the data, don't pop a
+        -- panel up over the next video.
+        if generation ~= state.file_generation then return end
+        show_stats_dialog(format_user_stats(data))
+        stats_visible = true
+        mp.msg.debug("📊 User stats dialog displayed")
+    end
+
+    http_request(endpoints.user_stats, "GET", {
+        userID = USER_ID,
         fetchCategoryStats = true,
         fetchActionTypeStats = true
-    })
-    if not data then
-        -- If fetch fails but we have cached data, use it anyway
-        if user_stats_cache.cached_data then
-            mp.msg.warn("⚠️ Failed to fetch fresh stats, using cached data: " .. (error_msg or "unknown error"))
-            local formatted_stats = format_user_stats(user_stats_cache.cached_data)
-            show_stats_dialog(formatted_stats)
-            stats_visible = true
-        else
-            show_toast("Failed to get user stats: " .. (error_msg or "unknown error"), "error", 5)
-            mp.msg.warn("❌ Failed to get user stats: " .. (error_msg or "unknown error"))
+    }, nil, function(data, error_msg)
+        if type(data) ~= "table" then
+            error_msg = error_msg or "unexpected response"
+            -- If fetch fails but we have cached data, use it anyway
+            if user_stats_cache.cached_data then
+                mp.msg.warn("⚠️ Failed to fetch fresh stats, using cached data: " .. error_msg)
+                display(user_stats_cache.cached_data)
+            else
+                stats_loading = false
+                show_toast("Failed to get user stats: " .. error_msg, "error", 5)
+                mp.msg.warn("❌ Failed to get user stats: " .. error_msg)
+            end
+            return
         end
-        return
-    end
 
-    -- /api/userStats doesn't expose viewCount (segments *you* submitted,
-    -- viewed by anyone) — fetch it separately from /api/userInfo. Best
-    -- effort: if this fails, the "Saved others from..." line is just
-    -- omitted rather than failing the whole dialog.
-    local view_data = http_request(endpoints.user_info, "GET", {
-        userID = options.user_id,
-        values = '["viewCount"]'
-    })
-    if view_data and view_data.viewCount then
-        data.viewCount = view_data.viewCount
-    end
+        -- /api/userStats doesn't expose viewCount (segments *you* submitted,
+        -- viewed by anyone) — fetch it separately from /api/userInfo. Best
+        -- effort: if this fails, the "Saved others from..." line is just
+        -- omitted rather than failing the whole dialog.
+        http_request(endpoints.user_info, "GET", {
+            userID = USER_ID,
+            values = '["viewCount"]'
+        }, nil, function(view_data)
+            if type(view_data) == "table" and view_data.viewCount then
+                data.viewCount = view_data.viewCount
+            end
 
-    -- Successfully fetched new data - update cache
-    user_stats_cache.cached_data = data
-    user_stats_cache.last_fetch_time = current_time
-    mp.msg.info("📊 User stats fetched and cached")
-
-    local formatted_stats = format_user_stats(data)
-    show_stats_dialog(formatted_stats)
-    stats_visible = true
-    mp.msg.debug("📊 User stats dialog displayed")
+            -- Successfully fetched new data - update cache
+            user_stats_cache.cached_data = data
+            user_stats_cache.last_fetch_time = current_time
+            mp.msg.info("📊 User stats fetched and cached")
+            display(data)
+        end)
+    end)
 end
 
 -- SEGMENT SUBMISSION SYSTEM
@@ -979,7 +1206,6 @@ function submit_segment(start_time, end_time, category)
     end
 
     mp.msg.info(string.format("📤 Submitting %s segment: %.1f - %.1f", category, start_time, end_time))
-    mp.msg.debug(string.format("🔑 Using userID: %s", options.user_id))
 
     -- Get video duration for submission
     local video_duration = mp.get_property_number("duration") or 0
@@ -1006,19 +1232,21 @@ function submit_segment(start_time, end_time, category)
     -- Convert to JSON string
     local json_string = utils.format_json(json_payload)
 
-    -- Make the request using JSON body
-    local data, error_msg = http_request(endpoints.skip_segments, "POST", nil, json_string)
-
-    if data then
-        show_toast("Segment submitted successfully", "success")
-        mp.msg.info("✅ Segment submitted successfully")
-        mp.msg.info("📊 Response: " .. utils.to_string(data))
-        -- Refresh segments to include our submission
-        get_segments()
-    else
-        show_toast("Failed to submit segment: " .. (error_msg or "unknown error"), "error", 5)
-        mp.msg.warn("❌ Failed to submit segment: " .. (error_msg or "unknown error"))
-    end
+    -- Make the request using JSON body; the answer arrives asynchronously
+    show_toast("Submitting segment…", "info", MAX_TIME * 2)
+    local generation = state.file_generation
+    http_request(endpoints.skip_segments, "POST", nil, json_string, function(data, error_msg)
+        if data then
+            show_toast("Segment submitted successfully", "success")
+            mp.msg.info("✅ Segment submitted successfully")
+            mp.msg.info("📊 Response: " .. utils.to_string(data))
+            -- Refresh segments to include our submission, if still on that video
+            if generation == state.file_generation then get_segments() end
+        else
+            show_toast("Failed to submit segment: " .. (error_msg or "unknown error"), "error", 5)
+            mp.msg.warn("❌ Failed to submit segment: " .. (error_msg or "unknown error"))
+        end
+    end)
 end
 
 -- Show segment submission dialog
@@ -1278,7 +1506,9 @@ function end_file()
         state.active_mute_segment = nil
     end
 
-    -- Reset state variables
+    -- Reset state variables. Bumping the generation makes any request
+    -- still in flight for this file ignore its answer when it arrives.
+    state.file_generation = state.file_generation + 1
     state.segments = nil
     state.youtube_id = nil
     state.base_chapters = nil
@@ -1321,7 +1551,7 @@ do
 
     if options.user_id and #options.user_id >= 30 and options.user_id:match("^[%w]+$") then
         state.has_valid_user_id = true
-        mp.msg.info(("Found user_id %s in config"):format(options.user_id))
+        mp.msg.info(("Using user_id %s"):format(mask_user_id(options.user_id)))
         mp.msg.info("   z to show/hide user stats dialog")
         mp.add_key_binding("z", "show_user_stats", get_user_stats)
     end

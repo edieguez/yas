@@ -96,6 +96,6 @@ reminder to change it to a regular `it(...)`. The IDs match the code review
 ## Requirements
 
 - MPV with Lua support
-- `curl` command available in system PATH
+- `curl` 7.87 or newer in your PATH (macOS 13+ and current Linux distributions ship it)
 - Internet connection for SponsorBlock API access
 - Valid SponsorBlock user ID for segment submission
