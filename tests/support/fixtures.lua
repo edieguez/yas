@@ -67,6 +67,7 @@ function F.boot(opts)
         home = opts.home,
         http_header_fields = opts.http_header_fields,
         purl = opts.purl,
+        no_input = opts.no_input,
     })
     local env = h:load(nil, opts.env)
     if not opts.no_file then h:fire("file-loaded") end

@@ -20,7 +20,30 @@ local options = {
     -- Optional manual override (e.g. pinning a specific ID). Leave empty
     -- to auto-generate one — the generated ID is persisted outside this
     -- file, see local_user_id_path() below, not written back here.
-    user_id = ""
+    user_id = "",
+
+    -- Skip a segment only the first time playback enters it; seeking
+    -- back into it afterwards plays it.
+    skip_once = true,
+    -- Categories that show a "press to skip" prompt instead of skipping
+    -- automatically (comma-separated, e.g. "filler,preview").
+    manual_skip_categories = "",
+    -- Key that skips in a manual prompt, undoes the last skip, and jumps to
+    -- a highlight when offered. Only bound while one of those is offered.
+    skip_key = "ENTER",
+    -- Seconds after a skip during which skip_key undoes it (0 = off).
+    unskip_window = 5,
+    -- Vote on the segment under the playhead (or the last one skipped).
+    upvote_key = "Ctrl+g",
+    downvote_key = "Ctrl+b",
+    -- Highlights (poi_highlight): add a chapter, offer a jump near the
+    -- start of the video, and bind highlight_key to jump at any time.
+    highlight = true,
+    highlight_key = "H",
+    highlight_prompt_duration = 8,
+    -- Announce full-video labels (the whole video is sponsored, self
+    -- promotion or exclusive access).
+    full_video_labels = true
 }
 
 -- VARIABLES AND STATE
@@ -34,6 +57,7 @@ local function build_endpoints()
     endpoints.viewed_video_sponsor_time = base .. "/api/viewedVideoSponsorTime"
     endpoints.user_stats = base .. "/api/userStats"
     endpoints.user_info = base .. "/api/userInfo"
+    endpoints.vote_on_sponsor_time = base .. "/api/voteOnSponsorTime"
 end
 
 -- curl limits, in seconds: a stalled server must never leave a request
@@ -49,7 +73,15 @@ local state = {
     base_chapters = nil, -- video's own chapters, captured once, before SponsorBlock ones are added
     file_generation = 0, -- bumped on every end-file; async replies for older files are dropped
     active_mute_segment = nil, -- the "mute" segment currently muting audio, if any
-    mute_before_segment = false -- mute state to restore once active_mute_segment ends
+    mute_before_segment = false, -- mute state to restore once active_mute_segment ends
+    highlight = nil, -- this video's poi_highlight segment, if any
+    full_label = nil, -- this video's full-video label segment, if any
+    last_segment = nil, -- last segment skipped/muted/prompted: the default vote target
+    prompt_segment = nil, -- manual-skip segment whose prompt is showing
+    -- uuid -> {skipped, counted, allowed, vote} for this file. Kept apart
+    -- from the segment tables so it survives a segments refresh.
+    seen = {},
+    manual = {} -- set of categories that prompt instead of auto-skipping
 }
 
 -- User stats caching variables
@@ -85,17 +117,47 @@ local overlays = {
 local stats_visible = false
 local stats_loading = false -- a stats fetch is in flight; ignore repeat z presses
 
--- Segment Categories for submission dialog
+-- SponsorBlock categories, in the browser extension's order. Used by the
+-- submission dialog, the stats panel, toasts and chapter titles.
+--   action: the action type a submission of this category uses
+--     skip  = a time range           poi  = a single point (start mark)
+--     full  = a label for the whole video   chapter = a named time range
 local segment_categories = {
-    {key = "sponsor", name = "Sponsor", desc = "Paid promotion, paid referrals and direct advertisements"},
-    {key = "selfpromo", name = "Unpaid/Self Promotion", desc = "Similar to sponsor but for unpaid content"},
-    {key = "interaction", name = "Interaction Reminder", desc = "Reminders to like, subscribe, follow, etc."},
-    {key = "intro", name = "Intermission/Intro Animation", desc = "Intro sequences, animations, or intermissions"},
-    {key = "outro", name = "Endcards/Credits", desc = "End credits, endcards, or outros"},
-    {key = "preview", name = "Preview/Recap", desc = "Collection of clips showing what's coming up"},
-    {key = "filler", name = "Filler Tangent", desc = "Tangential content that is not required"},
-    {key = "music_offtopic", name = "Non-Music Section", desc = "Only for music videos, covers non-music portions"}
+    {key = "sponsor", name = "Sponsor", action = "skip",
+     desc = "Paid promotion, paid referrals and direct advertisements"},
+    {key = "selfpromo", name = "Unpaid/Self Promotion", action = "skip",
+     desc = "Unpaid or self promotion: merchandise, donations, collaborations"},
+    {key = "exclusive_access", name = "Exclusive Access", action = "full",
+     desc = "The whole video showcases a product or service the creator got for free or early"},
+    {key = "interaction", name = "Interaction Reminder (Subscribe)", action = "skip",
+     desc = "Reminders to like, subscribe, follow or comment"},
+    {key = "poi_highlight", name = "Highlight", action = "poi",
+     desc = "The part of the video most people are looking for (uses the start mark)"},
+    {key = "intro", name = "Intermission/Intro Animation", action = "skip",
+     desc = "An interval without actual content: pauses, intro animations, static frames"},
+    {key = "outro", name = "Endcards/Credits", action = "skip",
+     desc = "Credits or YouTube endcards at the end of the video"},
+    {key = "preview", name = "Preview/Recap", action = "skip",
+     desc = "Clips showing what's coming up, or recapping what already happened"},
+    {key = "hook", name = "Hook/Greetings", action = "skip",
+     desc = "Teasers and greetings at the start that don't add information"},
+    {key = "filler", name = "Tangents/Jokes", action = "skip",
+     desc = "Tangential scenes or jokes not required to understand the video"},
+    {key = "chapter", name = "Chapter", action = "chapter",
+     desc = "A named chapter (asks for a name; needs mpv 0.38+)"},
+    {key = "music_offtopic", name = "Music: Non-Music Section", action = "skip",
+     desc = "Only for music videos: parts that aren't the music itself"}
 }
+
+local category_by_key = {}
+for _, c in ipairs(segment_categories) do category_by_key[c.key] = c end
+
+-- Display name of a category key ("selfpromo" -> "Unpaid/Self Promotion")
+local function category_name(key)
+    local c = category_by_key[key or ""]
+    if c then return c.name end
+    return ((key or "unknown"):gsub("^%l", string.upper):gsub("_", " "))
+end
 
 -- Kept outside the git-tracked config tree, in the XDG state dir - same
 -- rationale and pattern as local_stats_path() below. Generated identity
@@ -585,6 +647,8 @@ end
 -- time-pos observer that skips/mutes them.
 function apply_segments(data)
     state.segments = {}
+    state.highlight = nil
+    local new_full_label = nil
     for _, seg in ipairs(data) do
         -- Trust nothing from the API beyond "looks like a segment": a
         -- missing/malformed UUID or category would otherwise throw later
@@ -595,24 +659,51 @@ function apply_segments(data)
             and type(seg.category) == "string" and seg.category ~= ""
             and type(seg.actionType) == "string" then
             local start_time, end_time = tonumber(seg.segment[1]), tonumber(seg.segment[2])
-            if start_time and end_time and end_time > start_time then
-                table.insert(state.segments, {
-                    uuid = seg.UUID,
-                    short_uuid = string.sub(seg.UUID, 1, 6),
-                    category = seg.category,
-                    action = seg.actionType, -- API field is "actionType", not "action"
-                    start_time = start_time,
-                    end_time = end_time,
-                    skip_reported = false
-                })
+            local entry = {
+                uuid = seg.UUID,
+                short_uuid = string.sub(seg.UUID, 1, 6),
+                category = seg.category,
+                action = seg.actionType, -- API field is "actionType", not "action"
+                start_time = start_time,
+                end_time = end_time,
+                skip_reported = false
+            }
+            if seg.actionType == "poi" then
+                -- A highlight is a single point: [t, t]
+                if options.highlight and start_time and not state.highlight then
+                    state.highlight = entry
+                end
+            elseif seg.actionType == "full" then
+                -- A label for the whole video; its times are meaningless
+                if options.full_video_labels and not new_full_label then
+                    new_full_label = entry
+                end
+            elseif start_time and end_time and end_time > start_time
+                and (seg.actionType == "skip" or seg.actionType == "mute") then
+                table.insert(state.segments, entry)
             end
         else
             mp.msg.warn("⚠️ Skipping malformed SponsorBlock segment: " .. utils.to_string(seg))
         end
     end
+    -- Announce a full-video label once per file (not again on refresh).
+    -- It's a toast; prompts (highlight, undo) use their own line below it.
+    state.full_label = new_full_label
+    if new_full_label and not state.full_label_announced then
+        state.full_label_announced = true
+        show_toast("Entire video: " .. category_name(new_full_label.category), "info", 6)
+        mp.msg.info("🏷️ Full-video label: " .. new_full_label.category)
+    end
+
+    if state.highlight then
+        offer_highlight()
+    end
+
+    if #state.segments > 0 or state.highlight then
+        create_chapters()
+    end
     if #state.segments > 0 then
         mp.msg.info(("✅ SponsorBlock: %d segments found"):format(#state.segments))
-        create_chapters()
         -- Avoid stacking duplicate observers if segments are re-fetched
         -- mid-video (e.g. after a submission refresh). Always the same
         -- skip_ads_safe reference (defined after skip_ads() below) so
@@ -637,9 +728,12 @@ function create_chapters()
         table.insert(chapters, chapter)
     end
     local duration = mp.get_property_native("duration")
+    if state.highlight then
+        table.insert(chapters, { title = "Highlight", time = state.highlight.start_time })
+    end
     for _, segment in ipairs(state.segments) do
         table.insert(chapters, {
-            title = (segment.category or "unknown"):gsub("^%l", string.upper):gsub("_", " ")
+            title = category_name(segment.category)
                 .. (segment.action == "mute" and " [Mute]" or "")
                 .. " (" .. segment.short_uuid .. ")",
             time = (not duration or duration > segment.start_time) and segment.start_time or duration - 0.001
@@ -671,6 +765,202 @@ function report_skip(segment)
         end)
 end
 
+-- Per-file record for a segment, keyed by UUID (see state.seen)
+local function seen(segment)
+    local rec = state.seen[segment.uuid]
+    if not rec then
+        rec = {}
+        state.seen[segment.uuid] = rec
+    end
+    return rec
+end
+
+-- The single temporary "action" bound to skip_key: skip (manual prompt),
+-- undo (after a skip) or jump (highlight). Bound only while offered, so
+-- the key keeps its normal meaning the rest of the time. A normal (not
+-- forced) binding: it overrides mpv's built-in ENTER (playlist-next) but
+-- yields to the user's input.conf and to forced-input UIs such as the
+-- console, uosc menus or a text prompt.
+local action = { fn = nil, timer = nil }
+
+local function clear_action()
+    if action.timer then
+        action.timer:kill()
+        action.timer = nil
+    end
+    if action.fn then
+        action.fn = nil
+        mp.remove_key_binding("yas_action")
+        hide_action_prompt()
+    end
+end
+
+-- Offers `fn` on skip_key with `text` shown on the prompt line, for
+-- `seconds` (nil = until cleared). Returns false when it can't be offered.
+local function offer_action(fn, seconds, text)
+    clear_action()
+    if options.skip_key == "" then return false end
+    -- Never compete with the submission dialog or a text prompt
+    if segment_submission.dialog_visible or segment_submission.input_open then return false end
+    action.fn = fn
+    mp.add_key_binding(options.skip_key, "yas_action", safe_call(function()
+        local f = action.fn
+        clear_action()
+        if f then f() end
+    end, "skip key"))
+    if seconds then
+        action.timer = mp.add_timeout(seconds, clear_action)
+    end
+    show_action_prompt(text)
+    return true
+end
+
+local function duration_text(segment)
+    return ("%s (%.1fs)"):format(category_name(segment.category), segment.end_time - segment.start_time)
+end
+
+-- Seeks past a segment, reports it and offers to undo.
+local function do_skip(segment)
+    local rec = seen(segment)
+    rec.skipped = true
+    state.last_segment = segment
+    mp.msg.info(("⏭️ Skipping segment: %s [%s - %s]"):format(segment.category, segment.start_time, segment.end_time))
+    mp.set_property("time-pos", segment.end_time + 0.001)
+    report_skip(segment)
+    if not rec.counted then
+        rec.counted = true
+        record_local_skip(segment)
+    end
+
+    local message = "Skipped " .. duration_text(segment)
+    local offered = options.unskip_window > 0 and offer_action(function()
+        -- Undo: go back and let this segment play for the rest of the file
+        seen(segment).allowed = true
+        mp.set_property("time-pos", segment.start_time)
+        show_toast("Playing " .. category_name(segment.category), "info", 2)
+        mp.msg.info("↩️ Unskipped segment " .. segment.short_uuid)
+    end, options.unskip_window, message .. " · " .. options.skip_key .. " to undo")
+    if not offered then
+        show_toast(message, "info")
+    end
+end
+
+local function clear_skip_prompt()
+    if state.prompt_segment then
+        state.prompt_segment = nil
+        clear_action()
+    end
+end
+
+local function show_skip_prompt(segment)
+    -- By UUID: a segments refresh creates new tables for the same segment
+    if state.prompt_segment and state.prompt_segment.uuid == segment.uuid then
+        state.prompt_segment = segment
+        return
+    end
+    clear_skip_prompt()
+    state.last_segment = segment
+    if offer_action(function()
+        state.prompt_segment = nil
+        do_skip(segment)
+    end, nil, duration_text(segment) .. " · " .. options.skip_key .. " to skip") then
+        state.prompt_segment = segment
+    end
+end
+
+-- Formats seconds as m:ss or h:mm:ss
+local function clock(seconds)
+    seconds = math.floor(seconds + 0.5)
+    local h, m, sec = math.floor(seconds / 3600), math.floor(seconds / 60) % 60, seconds % 60
+    if h > 0 then return ("%d:%02d:%02d"):format(h, m, sec) end
+    return ("%d:%02d"):format(m, sec)
+end
+
+function jump_to_highlight()
+    if not state.highlight then
+        show_toast("This video has no highlight", "info", 2)
+        return
+    end
+    mp.set_property("time-pos", state.highlight.start_time)
+    show_toast("Jumped to the highlight", "info", 2)
+end
+
+-- Binds highlight_key and, when playback is still before the highlight
+-- (the first time per file), offers a jump on skip_key.
+function offer_highlight()
+    if not state.highlight_bound and options.highlight_key ~= "" then
+        mp.add_key_binding(options.highlight_key, "jump_to_highlight", safe_call(jump_to_highlight, "highlight key"))
+        state.highlight_bound = true
+    end
+    if state.highlight_offered then return end
+    state.highlight_offered = true
+    local pos = mp.get_property_number("time-pos") or 0
+    local at = state.highlight.start_time
+    if pos < at - 1 then
+        offer_action(jump_to_highlight, options.highlight_prompt_duration,
+            ("Highlight at %s · %s to jump"):format(clock(at), options.skip_key))
+    end
+end
+
+-- The segment to vote on: the one under the playhead, else the last one
+-- skipped, muted or prompted.
+local function vote_target()
+    local pos = mp.get_property_number("time-pos")
+    if pos and state.segments then
+        for _, segment in ipairs(state.segments) do
+            if pos >= segment.start_time and pos < segment.end_time then return segment end
+        end
+    end
+    return state.last_segment
+end
+
+-- type: 1 = upvote, 0 = downvote
+function vote(vote_type)
+    local segment = vote_target()
+    if not segment then
+        show_toast("No segment to vote on", "info", 2)
+        return
+    end
+    local rec = seen(segment)
+    local word = vote_type == 1 and "Upvoted" or "Downvoted"
+    if rec.vote == vote_type then
+        show_toast(("Already %s this segment"):format(word:lower()), "info", 2)
+        return
+    end
+    if rec.vote_pending then return end
+    rec.vote_pending = true
+    local generation = state.file_generation
+    http_request(endpoints.vote_on_sponsor_time, "POST", {
+        UUID = segment.uuid,
+        userID = USER_ID,
+        type = vote_type
+    }, nil, function(data, error_msg)
+        rec.vote_pending = false
+        -- The file changed meanwhile: rec belongs to a table end-file
+        -- discarded, and the toast would land on the next video
+        if generation ~= state.file_generation then return end
+        if data then
+            rec.vote = vote_type
+            if vote_type == 0 then
+                -- Don't keep skipping or muting a segment the viewer says
+                -- is wrong, starting right now
+                rec.allowed = true
+                if state.prompt_segment and state.prompt_segment.uuid == segment.uuid then
+                    clear_skip_prompt()
+                end
+                if state.active_mute_segment and state.active_mute_segment.uuid == segment.uuid then
+                    mp.set_property_bool("mute", state.mute_before_segment)
+                    state.active_mute_segment = nil
+                end
+            end
+            show_toast(("%s %s segment"):format(word, category_name(segment.category)), "success")
+            mp.msg.info(("🗳️ %s segment %s"):format(word, segment.short_uuid))
+        else
+            show_toast("Vote failed: " .. (error_msg or "unknown error"), "error", 5)
+        end
+    end)
+end
+
 -- Skip segments automatically
 function skip_ads(_, pos)
     if not pos or not state.segments then return end
@@ -685,24 +975,38 @@ function skip_ads(_, pos)
         end
     end
 
+    -- Withdraw a manual-skip prompt once playback leaves its segment
+    if state.prompt_segment then
+        local seg = state.prompt_segment
+        if pos < seg.start_time or pos >= seg.end_time then clear_skip_prompt() end
+    end
+
     for _, segment in ipairs(state.segments) do
         if pos >= segment.start_time and pos < segment.end_time then
-            if segment.action == "mute" then
-                if state.active_mute_segment ~= segment then
+            local rec = seen(segment)
+            if rec.allowed then
+                -- Undone or downvoted: let it play
+            elseif segment.action == "mute" then
+                -- Compared by UUID: a segments refresh creates new tables
+                if not state.active_mute_segment or state.active_mute_segment.uuid ~= segment.uuid then
                     state.mute_before_segment = mp.get_property_bool("mute")
                     mp.set_property_bool("mute", true)
                     state.active_mute_segment = segment
-                    show_toast(("Muted %s (%.1fs)"):format(segment.category, segment.end_time - segment.start_time), "info")
+                    state.last_segment = segment
+                    show_toast("Muted " .. duration_text(segment), "info")
                     mp.msg.info(("🔇 Muting segment: %s [%s - %s]"):format(segment.category, segment.start_time, segment.end_time))
                     report_skip(segment)
-                    record_local_skip(segment)
+                    if not rec.counted then
+                        rec.counted = true
+                        record_local_skip(segment)
+                    end
                 end
+            elseif options.skip_once and rec.skipped then
+                -- Already skipped once this file: the viewer came back on purpose
+            elseif state.manual[segment.category] then
+                show_skip_prompt(segment)
             else
-                show_toast(("Skipped %s (%.1fs)"):format(segment.category, segment.end_time - segment.start_time), "info")
-                mp.msg.info(("⏭️ Skipping segment: %s [%s - %s]"):format(segment.category, segment.start_time, segment.end_time))
-                mp.set_property("time-pos", segment.end_time + 0.001)
-                report_skip(segment)
-                record_local_skip(segment)
+                do_skip(segment)
             end
             return
         end
@@ -768,20 +1072,8 @@ function format_user_stats(data)
     if data.categoryCount then
         table.insert(rows, {text = ""})
         table.insert(rows, {text = "Segments by Category"})
-        local categories = {
-            {key = "sponsor", name = "Sponsor"},
-            {key = "intro", name = "Intro"},
-            {key = "outro", name = "Outro"},
-            {key = "interaction", name = "Interaction"},
-            {key = "selfpromo", name = "Self Promo"},
-            {key = "music_offtopic", name = "Music/Off-topic"},
-            {key = "preview", name = "Preview"},
-            {key = "filler", name = "Filler"},
-            {key = "poi_highlight", name = "Highlight"},
-            {key = "exclusive_access", name = "Exclusive Access"},
-            {key = "chapter", name = "Chapter"}
-        }
-
+        -- Same order and names as the submission dialog / the extension
+        local categories = segment_categories
         for _, cat in ipairs(categories) do
             local count = data.categoryCount[cat.key]
             if count and count > 0 then
@@ -885,28 +1177,16 @@ local function measure_text(text)
     return w
 end
 
--- kind: "info" (default), "success", or "error" — picks the text color.
-function show_toast(message, kind, duration)
-    kind = kind or "info"
-    duration = duration or 3
-
-    if not overlays.toast then
-        overlays.toast = mp.create_osd_overlay("ass-events")
-    end
-    -- Cancel any pending hide from a previous toast so it doesn't blank
-    -- this one out early.
-    if overlays.toast_timer then
-        overlays.toast_timer:kill()
-        overlays.toast_timer = nil
-    end
-
-    local style = TOAST_STYLE[kind] or TOAST_STYLE.info
+-- Draws a one-line rounded "pill" with `message` into overlay `ov`, with
+-- its top-left corner at (PAD*2, y). kind picks the text color.
+local function render_pill(ov, message, kind, y)
+    local style = TOAST_STYLE[kind or "info"] or TOAST_STYLE.info
     local full = style.icon .. message
 
     local width, height = get_virt_size()
     local max_w = width - PAD * 4
     local cw = math.min(measure_text(full), max_w)
-    local x, y = PAD * 2, PAD * 2
+    local x = PAD * 2
 
     local ass = assdraw.ass_new()
 
@@ -926,11 +1206,28 @@ function show_toast(message, kind, duration)
     ass:append(("{\\bord1\\1c&H%s&\\3c&H000000&\\fs%d\\fsp0\\q2%s}"):format(style.color, FONT_SIZE, clip))
     ass:append(full)
 
-    overlays.toast.res_x = width
-    overlays.toast.res_y = height
-    overlays.toast.z = 2000
-    overlays.toast.data = ass.text
-    overlays.toast:update()
+    ov.res_x = width
+    ov.res_y = height
+    ov.z = 2000
+    ov.data = ass.text
+    ov:update()
+end
+
+-- kind: "info" (default), "success", or "error" — picks the text color.
+function show_toast(message, kind, duration)
+    duration = duration or 3
+
+    if not overlays.toast then
+        overlays.toast = mp.create_osd_overlay("ass-events")
+    end
+    -- Cancel any pending hide from a previous toast so it doesn't blank
+    -- this one out early.
+    if overlays.toast_timer then
+        overlays.toast_timer:kill()
+        overlays.toast_timer = nil
+    end
+
+    render_pill(overlays.toast, message, kind, PAD * 2)
 
     overlays.toast_timer = mp.add_timeout(duration, function()
         if overlays.toast then
@@ -939,6 +1236,35 @@ function show_toast(message, kind, duration)
         end
         overlays.toast_timer = nil
     end)
+end
+
+-- The action prompt ("ENTER to skip", "to undo", "to jump") gets its own
+-- line under the toasts: it stays exactly as long as the key is bound and
+-- can't be painted over by an unrelated toast.
+function show_action_prompt(message)
+    if not overlays.action then
+        overlays.action = mp.create_osd_overlay("ass-events")
+    end
+    render_pill(overlays.action, message, "info", PAD * 4 + FONT_SIZE)
+end
+
+function hide_action_prompt()
+    if overlays.action then
+        overlays.action.data = ""
+        overlays.action:update()
+    end
+end
+
+-- Removes the current toast right away.
+function hide_toast()
+    if overlays.toast_timer then
+        overlays.toast_timer:kill()
+        overlays.toast_timer = nil
+    end
+    if overlays.toast then
+        overlays.toast.data = ""
+        overlays.toast:update()
+    end
 end
 
 -- Renders a centered panel from a list of rows (see format_user_stats()):
@@ -1029,8 +1355,10 @@ function draw_segment_dialog(start_time, end_time, selected_index)
 
     local width, height = get_virt_size()
     local header = ("Submit segment: %.1f–%.1fs (%.1fs)"):format(start_time, end_time, end_time - start_time)
-    local footer = "↑/↓ Navigate   Enter Submit   Esc Cancel"
+    local footer = "↑/↓ Navigate   1–9 Jump   Enter Submit   Esc Cancel"
     local n = #segment_categories
+    local focused_category = segment_categories[selected_index]
+    local desc = focused_category and focused_category.desc or ""
 
     -- Reserve a fixed indent for the focus arrow so rows never shift
     -- between focused/unfocused — the arrow is drawn on top of it, not
@@ -1038,6 +1366,7 @@ function draw_segment_dialog(start_time, end_time, selected_index)
     local arrow_w = measure_text("▶") + FONT_SIZE * 0.3
 
     local cw = math.max(measure_text(header), measure_text(footer))
+    local desc_sty = ("{\\bord1\\1c&HBBBBBB&\\3c&H000000&\\fs%d\\fsp0\\q2}"):format(math.floor(FONT_SIZE * 0.8))
     for i, category in ipairs(segment_categories) do
         local w = measure_text(i .. ". " .. category.name) + arrow_w
         if w > cw then cw = w end
@@ -1045,7 +1374,7 @@ function draw_segment_dialog(start_time, end_time, selected_index)
     cw = math.min(cw, width - PAD * 4)
 
     local box_w = cw + PAD * 2
-    local box_h = (n + 3) * LH + PAD * 2 -- header + rows + gap + footer
+    local box_h = (n + 4) * LH + PAD * 2 -- header + rows + description + gap + footer
     local x = (width - box_w) / 2
     local y = (height - box_h) / 2
 
@@ -1100,10 +1429,17 @@ function draw_segment_dialog(start_time, end_time, selected_index)
         ass:append((focused and focused_sty or sty) .. i .. ". " .. category.name)
     end
 
+    -- What the focused category means. Clipped to the panel: some
+    -- descriptions are longer than the widest row.
+    ass:new_event()
+    ass:an(7)
+    ass:pos(x + PAD, y + PAD + (n + 1.75) * LH)
+    ass:append(desc_sty .. ("{\\clip(%d,0,%d,%d)}"):format(math.floor(x), math.floor(x + box_w - PAD), height) .. desc)
+
     -- Footer hint
     ass:new_event()
     ass:an(7)
-    ass:pos(x + PAD, y + PAD + (n + 2) * LH)
+    ass:pos(x + PAD, y + PAD + (n + 3) * LH)
     ass:append(sty .. footer)
 
     overlays.stats.res_x = width
@@ -1143,12 +1479,7 @@ function get_user_stats()
 
     local function display(data)
         stats_loading = false
-        if overlays.toast_timer then -- drop the "Loading…" toast
-            overlays.toast_timer:kill()
-            overlays.toast_timer = nil
-            overlays.toast.data = ""
-            overlays.toast:update()
-        end
+        hide_toast() -- drop the "Loading…" toast
         -- The file changed while loading: keep the data, don't pop a
         -- panel up over the next video.
         if generation ~= state.file_generation then return end
@@ -1199,26 +1530,77 @@ end
 
 -- SEGMENT SUBMISSION SYSTEM
 -- Submit segment to SponsorBlock API
-function submit_segment(start_time, end_time, category)
+-- category: an entry of segment_categories. Its action decides the shape
+-- of the submission: a range (skip), a point (poi, uses the start mark), a
+-- whole-video label (full) or a named range (chapter, asks for the name).
+function submit_segment(start_time, end_time, category, chapter_name)
     if not state.youtube_id then
         show_toast("No YouTube video detected", "error")
         return
     end
 
-    mp.msg.info(string.format("📤 Submitting %s segment: %.1f - %.1f", category, start_time, end_time))
+    local action_type = category.action or "skip"
+    local segment = {start_time, end_time}
+    if action_type == "poi" then
+        segment = {start_time, start_time}
+    elseif action_type == "full" then
+        segment = {0, 0}
+    elseif action_type == "chapter" and not chapter_name then
+        -- mp.input (text prompts) exists since mpv 0.38
+        local ok, input = pcall(require, "mp.input")
+        if not ok or type(input) ~= "table" or not input.get then
+            show_toast("Submitting chapters needs mpv 0.38 or newer", "error", 5)
+            return
+        end
+        -- The prompt may outlive the file (playback continues meanwhile):
+        -- remember which video the marks belong to.
+        local generation = state.file_generation
+        clear_skip_prompt()
+        clear_action()
+        segment_submission.input_open = true
+        segment_submission.close_input = function()
+            segment_submission.input_open = false
+            segment_submission.close_input = nil
+            input.terminate()
+        end
+        input.get({
+            prompt = "Chapter name: ",
+            submit = function(text)
+                if segment_submission.close_input then segment_submission.close_input() end
+                if generation ~= state.file_generation then
+                    show_toast("Chapter not submitted: the video changed", "error", 4)
+                    return
+                end
+                text = (text or ""):gsub("^%s+", ""):gsub("%s+$", "")
+                if text == "" then
+                    show_toast("Chapter submission cancelled: no name given", "info", 3)
+                else
+                    submit_segment(start_time, end_time, category, text)
+                end
+            end,
+            closed = function()
+                segment_submission.input_open = false
+                segment_submission.close_input = nil
+            end
+        })
+        return
+    end
+
+    mp.msg.info(string.format("📤 Submitting %s (%s) segment: %.1f - %.1f",
+        category.key, action_type, segment[1], segment[2]))
 
     -- Get video duration for submission
     local video_duration = mp.get_property_number("duration") or 0
 
-    -- Create JSON payload in the format you discovered
     local json_payload = {
         videoID = state.youtube_id,
         userID = options.user_id,
         segments = {
             {
-                segment = {start_time, end_time},
-                category = category,
-                actionType = "skip"
+                segment = segment,
+                category = category.key,
+                actionType = action_type,
+                description = chapter_name
             }
         },
         service = "YouTube"
@@ -1237,7 +1619,7 @@ function submit_segment(start_time, end_time, category)
     local generation = state.file_generation
     http_request(endpoints.skip_segments, "POST", nil, json_string, function(data, error_msg)
         if data then
-            show_toast("Segment submitted successfully", "success")
+            show_toast(category.name .. " submitted successfully", "success")
             mp.msg.info("✅ Segment submitted successfully")
             mp.msg.info("📊 Response: " .. utils.to_string(data))
             -- Refresh segments to include our submission, if still on that video
@@ -1251,6 +1633,8 @@ end
 
 -- Show segment submission dialog
 function show_segment_dialog(start_time, end_time)
+    clear_skip_prompt()
+    clear_action() -- the dialog owns ENTER while it's open
     segment_submission.dialog_visible = true
     local selected_index = 1
 
@@ -1265,8 +1649,8 @@ function show_segment_dialog(start_time, end_time)
         mp.remove_key_binding("segment_dialog_down")
         mp.remove_key_binding("segment_dialog_enter")
         mp.remove_key_binding("segment_dialog_escape")
-        -- Also remove number key bindings for backward compatibility
-        for j = 1, #segment_categories do
+        -- Also remove number key bindings
+        for j = 1, math.min(9, #segment_categories) do
             mp.remove_key_binding("segment_category_" .. j)
         end
         segment_dialog_cleanup = nil
@@ -1281,7 +1665,7 @@ function show_segment_dialog(start_time, end_time)
         release_playback_open()
 
         local category = segment_categories[selected_index]
-        submit_segment(start_time, end_time, category.key)
+        submit_segment(start_time, end_time, category)
     end
 
     -- Function to cancel dialog
@@ -1332,8 +1716,8 @@ function show_segment_dialog(start_time, end_time)
     -- Bind Escape to cancel
     mp.add_forced_key_binding("ESC", "segment_dialog_escape", cancel_dialog)
 
-    -- Bind number keys for backward compatibility
-    for i = 1, #segment_categories do
+    -- Number keys jump to the first nine categories
+    for i = 1, math.min(9, #segment_categories) do
         mp.add_forced_key_binding(tostring(i), "segment_category_" .. i, function()
             handle_category_key(i)
         end)
@@ -1437,11 +1821,14 @@ function activate_segment_keybindings()
 
     mp.add_key_binding(";", "toggle_segment_marking", toggle_segment_marking)
     mp.add_key_binding(":", "cancel_segment_marking", cancel_segment_marking)
+    mp.add_key_binding(options.upvote_key, "upvote_segment", safe_call(function() vote(1) end, "upvote"))
+    mp.add_key_binding(options.downvote_key, "downvote_segment", safe_call(function() vote(0) end, "downvote"))
 
     segment_submission.keybindings_active = true
     mp.msg.info("✅ Segment submission keybindings enabled:")
     mp.msg.info("   ; to Start/End segment marking")
     mp.msg.info("   : to Cancel segment marking")
+    mp.msg.info(("   %s / %s to upvote / downvote a segment"):format(options.upvote_key, options.downvote_key))
 end
 
 function deactivate_segment_keybindings()
@@ -1449,6 +1836,8 @@ function deactivate_segment_keybindings()
 
     mp.remove_key_binding("toggle_segment_marking")
     mp.remove_key_binding("cancel_segment_marking")
+    mp.remove_key_binding("upvote_segment")
+    mp.remove_key_binding("downvote_segment")
 
     segment_submission.keybindings_active = false
     mp.msg.info("🚫 Segment submission keybindings disabled")
@@ -1512,6 +1901,21 @@ function end_file()
     state.segments = nil
     state.youtube_id = nil
     state.base_chapters = nil
+    state.highlight = nil
+    state.highlight_offered = false
+    state.full_label = nil
+    state.full_label_announced = false
+    state.last_segment = nil
+    state.seen = {}
+    clear_skip_prompt()
+    clear_action()
+    if segment_submission.close_input then
+        segment_submission.close_input() -- a chapter-name prompt for this video
+    end
+    if state.highlight_bound then
+        mp.remove_key_binding("jump_to_highlight")
+        state.highlight_bound = false
+    end
     user_stats_cache.cached_data = nil
     user_stats_cache.last_fetch_time = 0
 
@@ -1538,16 +1942,48 @@ function end_file()
 end
 
 do
-    -- Parse comma-separated option lists into API-friendly JSON array contents once
-    local function to_json_list(csv)
-        local items = {}
-        for item in string.gmatch(csv, "([^,]+)") do
-            table.insert(items, '"' .. item .. '"')
+    -- Parse comma-separated option lists (trimming spaces) into the JSON
+    -- array contents the API expects, adding what the enabled features
+    -- need: highlights (poi_highlight / poi) and full-video labels
+    -- (exclusive_access / full).
+    local function parse_list(csv)
+        local items, set = {}, {}
+        for item in string.gmatch(csv or "", "([^,]+)") do
+            item = item:match("^%s*(.-)%s*$")
+            if item ~= "" and not set[item] then
+                items[#items + 1] = item
+                set[item] = true
+            end
         end
-        return table.concat(items, ",")
+        return items, set
     end
-    options.categories = to_json_list(options.categories)
-    options.action_types = to_json_list(options.action_types)
+    local function add(list, item)
+        for _, existing in ipairs(list) do if existing == item then return end end
+        list[#list + 1] = item
+    end
+    local function to_json_list(list)
+        local quoted = {}
+        for i, item in ipairs(list) do quoted[i] = '"' .. item .. '"' end
+        return table.concat(quoted, ",")
+    end
+
+    local categories = parse_list(options.categories)
+    local action_types = parse_list(options.action_types)
+    if options.highlight then
+        add(categories, "poi_highlight")
+        add(action_types, "poi")
+    end
+    if options.full_video_labels then
+        add(categories, "exclusive_access")
+        add(action_types, "full")
+    end
+    options.categories = to_json_list(categories)
+    options.action_types = to_json_list(action_types)
+    local manual_list, manual = parse_list(options.manual_skip_categories)
+    state.manual = manual
+    -- A category set to prompt must also be fetched, or it never appears
+    for _, category in ipairs(manual_list) do add(categories, category) end
+    options.categories = to_json_list(categories)
 
     if options.user_id and #options.user_id >= 30 and options.user_id:match("^[%w]+$") then
         state.has_valid_user_id = true

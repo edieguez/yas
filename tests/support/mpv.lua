@@ -401,6 +401,14 @@ function M.new(opts)
         package.loaded["mp.utils"] = nil
         package.loaded["mp.options"] = nil
         package.loaded["mp.assdraw"] = nil
+        package.loaded["mp.input"] = nil
+        -- mp.input exists since mpv 0.38; opts.no_input simulates older mpv
+        package.preload["mp.input"] = not opts.no_input and function()
+            return {
+                get = function(t) self.input_prompt = t end,
+                terminate = function() self.input_prompt = nil end,
+            }
+        end or nil
         package.preload["mp.utils"] = function() return self.utils end
         package.preload["mp.options"] = function() return self.options end
         package.preload["mp.assdraw"] = function() return self.assdraw end

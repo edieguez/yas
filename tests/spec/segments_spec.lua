@@ -13,19 +13,20 @@ describe("fetching segments", function()
         expect.count(reqs, 1)
         expect.eq(reqs[1].params.videoID, F.VIDEO_ID)
         expect.eq(reqs[1].params.categories,
-            '["sponsor","selfpromo","interaction","intro","outro","preview","hook","filler"]')
-        expect.eq(reqs[1].params.actionTypes, '["skip","mute"]')
+            '["sponsor","selfpromo","interaction","intro","outro","preview","hook","filler","poi_highlight","exclusive_access"]')
+        expect.eq(reqs[1].params.actionTypes, '["skip","mute","poi","full"]')
     end)
 
     it("sends the categories configured in yas.conf", function()
-        local h = F.boot({ conf = { categories = "sponsor,intro", action_types = "skip" } })
+        local h = F.boot({ conf = { categories = "sponsor,intro", action_types = "skip",
+                                    highlight = "no", full_video_labels = "no" } })
         local req = h:requests_to("GET", "/api/skipSegments")[1]
         expect.eq(req.params.categories, '["sponsor","intro"]')
         expect.eq(req.params.actionTypes, '["skip"]')
     end)
 
-    known_bug("M4", "trims spaces in comma-separated option lists", function()
-        local h = F.boot({ conf = { categories = "sponsor, intro" } })
+    it("trims spaces in comma-separated option lists", function()
+        local h = F.boot({ conf = { categories = "sponsor, intro", highlight = "no", full_video_labels = "no" } })
         local req = h:requests_to("GET", "/api/skipSegments")[1]
         expect.eq(req.params.categories, '["sponsor","intro"]')
     end)
@@ -122,7 +123,7 @@ describe("chapters", function()
             "30 Sponsor (aaaaaa)",
             "60 ",
             "80 Main",
-            "100 Selfpromo [Mute] (bbbbbb)",
+            "100 Unpaid/Self Promotion [Mute] (bbbbbb)",
             "120 ",
         })
     end)
@@ -140,9 +141,14 @@ describe("chapters", function()
         expect.eq(last.time, 599.999)
     end)
 
-    it("turns underscores in category names into spaces", function()
+    it("titles chapters with the categories' display names", function()
         local h = F.boot({ segments = { F.segment("dddddd-music", "music_offtopic", 5, 9) } })
-        expect.eq(h.props["chapter-list"][1].title, "Music offtopic (dddddd)")
+        expect.eq(h.props["chapter-list"][1].title, "Music: Non-Music Section (dddddd)")
+    end)
+
+    it("prettifies categories it doesn't know", function()
+        local h = F.boot({ segments = { F.segment("eeeeee-new", "brand_new_thing", 5, 9) } })
+        expect.eq(h.props["chapter-list"][1].title, "Brand new thing (eeeeee)")
     end)
 
     known_bug("L2", "keeps the video's chapter name after a segment ends", function()

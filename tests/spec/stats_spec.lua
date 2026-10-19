@@ -34,7 +34,7 @@ describe("format_user_stats", function()
             if row.label then labels[#labels + 1] = row.label .. "=" .. row.value end
         end
         expect.eq(labels, { "Time Saved=1d 1h 0.5m", "Segments Submitted=12",
-                            "Sponsor=10", "Self Promo=2", "Skip=11", "Mute=1" })
+                            "Sponsor=10", "Unpaid/Self Promotion=2", "Skip=11", "Mute=1" })
     end)
 end)
 

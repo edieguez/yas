@@ -3,63 +3,97 @@ SponsorBlock plugin for MPV implemented (mostly) in Lua
 
 ## Features
 
-- **Skip segments**: Automatically skip sponsored segments, intros, outros, and more
-- **User statistics**: View your SponsorBlock contribution stats (press `z`)
-- **Submit segments**: Mark and submit new segments to SponsorBlock database
-- **Chapter integration**: Creates MPV chapters for sponsored segments
+- **Skip segments**: automatically skip sponsors, intros, outros and more,
+  once per video, with a few seconds to undo a skip
+- **Manual skip mode**: for chosen categories, show a prompt and skip only
+  when you press the skip key
+- **Mute segments**: mute-type segments mute the audio instead of skipping
+- **Highlights**: jump to the part of the video most people came for
+- **Full-video labels**: tells you when a whole video is sponsored,
+  self-promotion or exclusive access
+- **Voting**: upvote or downvote the segment you just hit
+- **Submit segments**: mark and submit new segments, highlights, labels and
+  chapters
+- **User statistics**: your SponsorBlock contribution stats (press `z`)
+- **Chapter integration**: segments and highlights appear as mpv chapters
 
 ## Installation
 
-1. Copy `yas.lua` to your MPV `scripts` directory
-2. Copy `yas.conf.template` to `script-opts/yas.conf` and configure
+1. Copy `scripts/yas.lua` to your mpv `scripts` directory
+2. Copy `script-opts/yas.conf` to your mpv `script-opts` directory and adjust it
 
 ## Configuration
 
-Edit `script-opts/yas.conf`:
+Every option is listed with its default in `script-opts/yas.conf`. The most
+useful ones:
 
-```ini
-# Categories to skip (comma-separated)
-categories=sponsor,selfpromo,interaction,intro,outro,preview,hook,filler
-
-# Optional: pin a specific local user ID (required for submitting
-# segments). This must be a randomly generated 30+ character string, NOT
-# the public userID from the stats page. Leave commented out to
-# auto-generate one (recommended) - the generated ID is stored in
-# ~/.local/state/mpv/yas_user_id, not in this file.
-# user_id=your_32_character_user_id_here
-```
+| Option | Default | What it does |
+| --- | --- | --- |
+| `categories` | `sponsor,selfpromo,interaction,intro,outro,preview,hook,filler` | Categories to act on |
+| `action_types` | `skip,mute` | `mute` segments are muted instead of skipped |
+| `skip_once` | `yes` | Skip a segment only the first time; seeking back into it plays it |
+| `manual_skip_categories` | *(empty)* | Categories that prompt instead of skipping, e.g. `filler,preview` |
+| `skip_key` | `ENTER` | Skips in a prompt, undoes a skip, jumps to a highlight. Only bound while one of these is offered, and yields to your own `input.conf` bindings: if you bind `ENTER` there, choose another key. Empty = no prompts |
+| `unskip_window` | `5` | Seconds after a skip during which `skip_key` undoes it (`0` = off) |
+| `upvote_key` / `downvote_key` | `Ctrl+g` / `Ctrl+b` | Vote on the segment under the playhead, or the last one skipped |
+| `highlight` | `yes` | Fetch highlights, add a chapter and offer a jump |
+| `highlight_key` | `H` | Jump to the highlight at any time |
+| `full_video_labels` | `yes` | Announce full-video labels |
+| `server_address` | `https://sponsor.ajay.app` | SponsorBlock server or mirror |
+| `user_id` | *(generated)* | Pin a private user ID (30+ letters/digits). Leave unset: one is generated and kept in `~/.local/state/mpv/yas_user_id` |
 
 ## Usage
 
-### Viewing segments
-- Segments are automatically fetched and skipped for YouTube videos
-- Press `z` to view your SponsorBlock statistics
+### While watching
+- Segments are fetched and handled automatically for YouTube videos.
+- After a skip, press `Enter` within 5 seconds to undo it.
+- In a manual-skip category, press `Enter` to skip.
+- Near the start of a video with a highlight, press `Enter` to jump to it,
+  or `H` at any time.
+- Press `Ctrl+g` (good) or `Ctrl+b` (bad) to vote. A downvoted segment
+  isn't skipped again in that video.
+- Press `z` to show or hide your SponsorBlock statistics.
 
 ### Submitting segments
-1. **Mark segment start**: Press `;`
-2. **Mark segment end**: Press `;` again
-3. **Navigate categories**: Use ↑/↓ arrow keys to navigate
-4. **Submit segment**: Press `Enter` to submit selected category
-5. **Cancel**: Press `Escape` to cancel marking
+1. **Mark the start**: press `;`
+2. **Mark the end**: press `;` again (`:` cancels marking)
+3. **Pick a category**: `↑`/`↓`, or `1`–`9` to jump; the focused category's
+   description is shown under the list
+4. **Submit**: `Enter` (`Esc` cancels)
+
+How the marks are used depends on the category:
+- **Highlight**: a single point at the start mark
+- **Exclusive Access**: a label for the whole video; the marks are ignored
+- **Chapter**: asks for the chapter's name (needs mpv 0.38 or newer)
+- **All others**: the marked range
 
 ### Keyboard shortcuts
-- `z` - Show user statistics
-- `;` - Start/end segment marking
-- `Escape` - Cancel segment marking
-- `↑/↓` - Navigate categories (in submission dialog)
-- `Enter` - Submit selected category (in submission dialog)
-- `1-8` - Quick select category (in submission dialog)
+
+| Key | Action | Binding name (for `input.conf`) |
+| --- | --- | --- |
+| `Enter` | Skip / undo / jump, when offered | (temporary) |
+| `H` | Jump to the highlight | `yas/jump_to_highlight` |
+| `Ctrl+g` / `Ctrl+b` | Upvote / downvote | `yas/upvote_segment`, `yas/downvote_segment` |
+| `;` | Start/end segment marking | `yas/toggle_segment_marking` |
+| `:` | Cancel segment marking | `yas/cancel_segment_marking` |
+| `z` | Show/hide user statistics | `yas/show_user_stats` |
 
 ## Segment Categories
 
-1. **Sponsor** - Paid promotion, paid referrals and direct advertisements
-2. **Unpaid/Self Promotion** - Similar to sponsor but for unpaid content
-3. **Interaction Reminder** - Reminders to like, subscribe, follow, etc.
-4. **Intermission/Intro Animation** - Intro sequences, animations, or intermissions
-5. **Endcards/Credits** - End credits, endcards, or outros
-6. **Preview/Recap** - Collection of clips showing what's coming up
-7. **Filler Tangent** - Tangential content that is not required
-8. **Non-Music Section** - Only for music videos, covers non-music portions
+In the same order as the SponsorBlock browser extension:
+
+1. **Sponsor**: paid promotion, paid referrals and direct advertisements
+2. **Unpaid/Self Promotion**: merchandise, donations, collaborations
+3. **Exclusive Access**: the whole video showcases something the creator got for free or early
+4. **Interaction Reminder (Subscribe)**: reminders to like, subscribe, follow or comment
+5. **Highlight**: the part of the video most people are looking for
+6. **Intermission/Intro Animation**: pauses, intro animations, static frames
+7. **Endcards/Credits**: credits or endcards at the end
+8. **Preview/Recap**: what's coming up, or what already happened
+9. **Hook/Greetings**: teasers and greetings that don't add information
+10. **Tangents/Jokes**: tangential scenes or jokes not needed to follow the video
+11. **Chapter**: a named chapter
+12. **Music: Non-Music Section**: only for music videos, the parts that aren't music
 
 ## Development
 
@@ -98,4 +132,4 @@ reminder to change it to a regular `it(...)`. The IDs match the code review
 - MPV with Lua support
 - `curl` 7.87 or newer in your PATH (macOS 13+ and current Linux distributions ship it)
 - Internet connection for SponsorBlock API access
-- Valid SponsorBlock user ID for segment submission
+- mpv 0.38 or newer only for submitting chapters (everything else works on older versions)
