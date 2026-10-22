@@ -58,7 +58,7 @@ describe("user ID", function()
         expect.contains(h:log_text("warn"), "No valid user_id configured")
     end)
 
-    known_bug("L3", "warns when a configured user_id is too short instead of silently replacing it", function()
+    it("warns when a configured user_id is too short instead of silently replacing it", function()
         local h = F.boot({ conf = { user_id = "short" } })
         expect.contains(h:log_text("warn"), "user_id")
     end)

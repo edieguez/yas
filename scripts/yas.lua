@@ -454,6 +454,9 @@ do
     -- owner-only secret file curl reads it from.
     function identity.resolve()
         local options = core.options
+        if options.user_id and options.user_id ~= "" and #options.user_id < 30 then
+            mp.msg.warn("⚠️ user_id in yas.conf is shorter than 30 characters; ignoring it")
+        end
         if not options.user_id or #options.user_id < 30 then
             local existing_id = load_generated()
             if existing_id and #existing_id >= 30 then
