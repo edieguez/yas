@@ -250,7 +250,7 @@ describe("category dialog", function()
         expect.contains(h:screen(), "Hook")
     end)
 
-    known_bug("M6", "is not painted over when z is pressed", function()
+    it("is not painted over when z is pressed", function()
         local h = F.boot()
         F.mark(h, 10, 20)
         h:press("z")

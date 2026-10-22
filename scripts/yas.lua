@@ -1575,6 +1575,9 @@ do
     function stats.toggle()
         local state = core.state
 
+        -- The category dialog draws in the same panel and keeps its keys
+        if core.submission.dialog_visible then return end
+
         -- If stats are already visible, hide them
         if visible then
             ui.hide_panel()
