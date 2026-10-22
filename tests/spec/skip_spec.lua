@@ -57,6 +57,14 @@ describe("skipping", function()
         expect.contains(h2:screen(), "You've skipped 1 segments (30s)")
     end)
 
+    it("adds up skips from two mpv windows", function()
+        local h1 = F.boot({ segments = { F.SPONSOR } })
+        local h2 = F.boot({ home = h1.home, segments = { F.SPONSOR } })
+        h1:set_time(35)
+        h2:set_time(35)
+        expect.contains(h2:read_state_file("yas_stats.conf"), "skip_count=2")
+    end)
+
     it("skips a segment the moment playback starts inside it", function()
         local h = F.boot({ segments = { F.segment("eeeeee-intro", "intro", 0, 12) }, no_file = true })
         h.props["time-pos"] = 0

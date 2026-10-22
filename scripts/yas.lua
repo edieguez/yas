@@ -345,6 +345,7 @@ do
     -- immediately — writes are rare (at most a handful per video), so there's
     -- no need to batch them.
     function store.record_local_skip(segment)
+        store.load_local_stats() -- another mpv window may have written since
         store.local_stats.skip_count = store.local_stats.skip_count + 1
         store.local_stats.minutes_saved = store.local_stats.minutes_saved + (segment.end_time - segment.start_time) / 60
         store.save_local_stats()
