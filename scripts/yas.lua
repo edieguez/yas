@@ -657,10 +657,18 @@ do
         local purl = mp.get_property("metadata/by-key/PURL", "")
         local urls = {
             "https?://youtu%.be/([%w-_]+).*",
-            "https?://w?w?w?%.?youtube%.com/v/([%w-_]+).*",
-            "/watch.*[?&]v=([%w-_]+).*",
-            "/embed/([%w-_]+).*",
-            "-([%w-_]+)%." -- fallback
+            "https?://w?w?w?%.?youtube%.com/v/([%w-_]+)",
+            "/watch.*[?&]v=([%w-_]+)",
+            "/embed/([%w-_]+)",
+            "/shorts/([%w-_]+)",
+            "/live/([%w-_]+)",
+        }
+        -- Downloaded files: yt-dlp's "Title [ID].ext" and the older
+        -- "Title-ID.ext". An ID is exactly 11 characters; anything else is
+        -- just a dash in a file name.
+        local files = {
+            "%[([%w-_]+)%]%.%w+$",
+            ".*-([%w-_]+)%.%w+$",
         }
         mp.msg.debug("🔎 Detecting YouTube ID from path: " .. video_path)
         for _, url in ipairs(urls) do
@@ -668,6 +676,13 @@ do
             if candidate and #candidate >= 11 then
                 mp.msg.info("🆔 YouTube ID detected: " .. string.sub(candidate, 1, 11))
                 return string.sub(candidate, 1, 11)
+            end
+        end
+        for _, file in ipairs(files) do
+            local candidate = string.match(video_path, file)
+            if candidate and #candidate == 11 then
+                mp.msg.info("🆔 YouTube ID detected: " .. candidate)
+                return candidate
             end
         end
         mp.msg.warn("⚠️ No YouTube ID detected")

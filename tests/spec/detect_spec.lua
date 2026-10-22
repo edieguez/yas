@@ -55,19 +55,19 @@ describe("detect_youtube_id", function()
         expect.contains(h:log_text("warn"), "No YouTube ID detected")
     end)
 
-    known_bug("M2", "does not treat any dashed local file name as a video ID", function()
+    it("does not treat any dashed local file name as a video ID", function()
         expect.is_nil((detect({ path = "/home/me/Videos/my-holiday-video-2023.mp4" })))
     end)
 
-    known_bug("M2", "reads current yt-dlp file names (Title [ID].ext)", function()
+    it("reads current yt-dlp file names (Title [ID].ext)", function()
         expect.eq(detect({ path = "/videos/Rick Astley - Never Gonna Give You Up [dQw4w9WgXcQ].webm" }), F.VIDEO_ID)
     end)
 
-    known_bug("M2", "reads /shorts/ URLs", function()
+    it("reads /shorts/ URLs", function()
         expect.eq(detect({ path = "https://www.youtube.com/shorts/dQw4w9WgXcQ" }), F.VIDEO_ID)
     end)
 
-    known_bug("M2", "reads /live/ URLs", function()
+    it("reads /live/ URLs", function()
         expect.eq(detect({ path = "https://www.youtube.com/live/dQw4w9WgXcQ" }), F.VIDEO_ID)
     end)
 end)
