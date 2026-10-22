@@ -36,7 +36,7 @@ local core, categories, timefmt, store, identity, http, detect, ui, segments, st
 -- and writes these tables; nothing here talks to SponsorBlock or the OSD.
 -- ----------------------------------------------------------------------------
 do
-    -- Default options; script-opts/yas.conf overrides them (see main.lua)
+    -- Default options; script-opts/yas.conf overrides them (see STARTUP)
     core.options = {
         server_address = "https://sponsor.ajay.app",
         categories = "sponsor,selfpromo,interaction,intro,outro,preview,hook,filler",
@@ -45,7 +45,7 @@ do
         action_types = "skip,mute",
         -- Optional manual override (e.g. pinning a specific ID). Leave empty
         -- to auto-generate one — the generated ID is persisted outside this
-        -- file (see lib/identity.lua), not written back here.
+        -- file (see IDENTITY), not written back here.
         user_id = "",
 
         -- Skip a segment only the first time playback enters it; seeking
@@ -364,7 +364,7 @@ end
 -- ----------------------------------------------------------------------------
 do
     -- Pass this as a request parameter value to send the user ID: curl reads
-    -- it from the owner-only secret file (see lib/http.lua).
+    -- it from the owner-only secret file (see HTTP).
     identity.USER_ID = setmetatable({}, { __tostring = function() return "<userID>" end })
 
     -- Owner-only file holding the ID for curl; nil if it couldn't be written
