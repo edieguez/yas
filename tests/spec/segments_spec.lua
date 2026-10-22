@@ -121,10 +121,10 @@ describe("chapters", function()
         expect.eq(chapter_titles(h), {
             "0 Intro",
             "30 Sponsor (aaaaaa)",
-            "60 ",
+            "60 Intro",
             "80 Main",
             "100 Unpaid/Self Promotion [Mute] (bbbbbb)",
-            "120 ",
+            "120 Main",
         })
     end)
 
@@ -151,7 +151,7 @@ describe("chapters", function()
         expect.eq(h.props["chapter-list"][1].title, "Brand new thing (eeeeee)")
     end)
 
-    known_bug("L2", "keeps the video's chapter name after a segment ends", function()
+    it("keeps the video's chapter name after a segment ends", function()
         local h = F.boot({ segments = { F.SPONSOR }, chapters = { { title = "Intro", time = 0 } } })
         expect.eq(h.props["chapter-list"][3].title, "Intro")
     end)

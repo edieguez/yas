@@ -1162,6 +1162,15 @@ do
         for _, chapter in ipairs(state.base_chapters) do
             table.insert(chapters, chapter)
         end
+        -- The video's own chapter in effect at `t`, so its name comes back
+        -- once a segment ends instead of staying blank
+        local function base_title(t)
+            local title = ""
+            for _, chapter in ipairs(state.base_chapters) do
+                if chapter.time <= t then title = chapter.title or "" end
+            end
+            return title
+        end
         local duration = mp.get_property_native("duration")
         if state.highlight then
             table.insert(chapters, { title = "Highlight", time = state.highlight.start_time })
@@ -1174,7 +1183,7 @@ do
                 time = (not duration or duration > segment.start_time) and segment.start_time or duration - 0.001
             })
             table.insert(chapters, {
-                title = "",
+                title = base_title(segment.end_time),
                 time = (not duration or duration > segment.end_time) and segment.end_time or duration - 0.001
             })
         end
