@@ -1311,7 +1311,9 @@ do
         end
     end
 
-    -- time-pos observer: skips, mutes or prompts for the segment at `pos`
+    -- time-pos observer: skips, mutes or prompts for the segments at `pos`.
+    -- Segments overlap across categories, so every one under the playhead
+    -- is considered; only an actual skip (a seek) ends the pass.
     function segments.on_time_pos(_, pos)
         if not pos or not state.segments then return end
 
@@ -1357,8 +1359,8 @@ do
                     show_skip_prompt(segment)
                 else
                     do_skip(segment)
+                    return
                 end
-                return
             end
         end
     end

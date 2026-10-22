@@ -32,6 +32,13 @@ describe("manual skip mode", function()
         expect.count(h:requests_to("POST", "/api/viewedVideoSponsorTime"), 0)
     end)
 
+    it("still auto-skips a segment inside a prompted one", function()
+        local h = F.boot({ conf = { user_id = F.USER_ID, manual_skip_categories = "filler" },
+            segments = { F.segment("f1", "filler", 10, 60), F.SPONSOR } })
+        h:set_time(35)
+        expect.eq(h.seeks, { 60.001 })
+    end)
+
     it("still auto-skips categories that aren't manual", function()
         local h = F.boot({ conf = conf, segments = { F.segment("iiiiii-intro", "intro", 5, 15) } })
         h:set_time(6)
