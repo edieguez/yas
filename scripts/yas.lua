@@ -1874,13 +1874,14 @@ do
 
         redraw()
 
-        mp.add_forced_key_binding("UP", "segment_dialog_up", function() move(-1) end)
-        mp.add_forced_key_binding("DOWN", "segment_dialog_down", function() move(1) end)
-        mp.add_forced_key_binding("ENTER", "segment_dialog_enter", submit_selected)
-        mp.add_forced_key_binding("ESC", "segment_dialog_escape", cancel)
+        local guard = core.safe_call
+        mp.add_forced_key_binding("UP", "segment_dialog_up", guard(function() move(-1) end, "dialog up"))
+        mp.add_forced_key_binding("DOWN", "segment_dialog_down", guard(function() move(1) end, "dialog down"))
+        mp.add_forced_key_binding("ENTER", "segment_dialog_enter", guard(submit_selected, "dialog enter"))
+        mp.add_forced_key_binding("ESC", "segment_dialog_escape", guard(cancel, "dialog escape"))
         -- Number keys jump to the first nine categories
         for i = 1, NUMBER_KEYS do
-            mp.add_forced_key_binding(tostring(i), "segment_category_" .. i, function() jump(i) end)
+            mp.add_forced_key_binding(tostring(i), "segment_category_" .. i, guard(function() jump(i) end, "dialog number"))
         end
     end
 
@@ -1948,8 +1949,8 @@ do
     local function activate_bindings()
         if submission.keybindings_active then return end
 
-        mp.add_key_binding(";", "toggle_segment_marking", submit.toggle_marking)
-        mp.add_key_binding(":", "cancel_segment_marking", submit.cancel_marking)
+        mp.add_key_binding(";", "toggle_segment_marking", core.safe_call(submit.toggle_marking, "toggle marking"))
+        mp.add_key_binding(":", "cancel_segment_marking", core.safe_call(submit.cancel_marking, "cancel marking"))
         mp.add_key_binding(options.upvote_key, "upvote_segment", core.safe_call(function() segments.vote(1) end, "upvote"))
         mp.add_key_binding(options.downvote_key, "downvote_segment", core.safe_call(function() segments.vote(0) end, "downvote"))
 
@@ -2073,7 +2074,7 @@ do
     if state.has_valid_user_id then
         mp.msg.info(("Using user_id %s"):format(identity.mask(options.user_id)))
         mp.msg.info("   z to show/hide user stats dialog")
-        mp.add_key_binding("z", "show_user_stats", stats.toggle)
+        mp.add_key_binding("z", "show_user_stats", core.safe_call(stats.toggle, "stats key"))
     end
 
     -- MPV EVENTS

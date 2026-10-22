@@ -41,10 +41,11 @@ describe("error containment", function()
         expect.contains(h:log_text("error"), "unhandled error in skip_ads")
     end)
 
-    known_bug("M5", "contains an error raised inside a key binding", function()
+    it("contains an error raised inside a key binding", function()
         local h, env = F.boot()
         env.http.request = function() error("boom") end
         expect.no_error(function() h:press("z") end)
+        expect.contains(h:log_text("error"), "unhandled error in stats key")
     end)
 end)
 
