@@ -543,9 +543,6 @@ do
         return body, nil, code
     end
 
-    -- Counter for temporary request-body files
-    local body_file_seq = 0
-
     -- Adds one parameter to a curl command. GET parameters go in the query
     -- string via --get/--data-urlencode; for POST they're appended to the URL
     -- with --url-query (curl 7.87+) so the body stays free. The USER_ID
@@ -570,13 +567,11 @@ do
     -- logged instead of killing the script's event loop.
     --   query_params: table of parameters; use identity.USER_ID as a value
     --                 to send the private userID without exposing it.
-    --   json_body:    string. If it contains the userID it is passed to curl
-    --                 through a temporary owner-only file, never inline.
+    --   json_body:    string, sent inline: it must not contain the userID
+    --                 (mpv logs the command line); use query_params for it.
     function http.request(url, method, query_params, json_body, callback)
         method = method or "GET"
         callback = callback or function() end
-        local options = core.options
-        local secret_path = identity.secret_path
 
         local curl_cmd = {
             "curl", "--location", "--silent",
@@ -594,23 +589,11 @@ do
 
         table.insert(curl_cmd, url)
 
-        local body_file = nil
         if json_body then
             table.insert(curl_cmd, "--header")
             table.insert(curl_cmd, "Content-Type: application/json")
             table.insert(curl_cmd, "--data")
-            if secret_path and options.user_id and json_body:find(options.user_id, 1, true) then
-                body_file_seq = body_file_seq + 1
-                body_file = ("%s.body%d.json"):format(secret_path, body_file_seq)
-                if store.write_private_file(body_file, json_body) then
-                    table.insert(curl_cmd, "@" .. body_file)
-                else
-                    body_file = nil
-                    table.insert(curl_cmd, json_body)
-                end
-            else
-                table.insert(curl_cmd, json_body)
-            end
+            table.insert(curl_cmd, json_body)
         end
         if query_params then
             -- Sorted so commands (and logs) are deterministic
@@ -623,7 +606,6 @@ do
         mp.msg.debug("🐚 curl command: " .. identity.redact(table.concat(curl_cmd, " ")))
 
         local done = core.safe_call(function(success, result, error_string)
-            if body_file then os.remove(body_file) end
             local data, err, code = http.parse_result(success, result, error_string)
             if err and code ~= 404 then -- 404 is routine ("no segments"); callers decide
                 mp.msg.warn(("❌ HTTP %s %s failed: %s"):format(method, url, err))
@@ -1750,7 +1732,6 @@ do
 
         local json_payload = {
             videoID = state.youtube_id,
-            userID = options.user_id,
             segments = {
                 {
                     segment = segment,
@@ -1772,7 +1753,9 @@ do
         -- The answer arrives asynchronously
         ui.toast("Submitting segment…", "info", core.MAX_TIME * 2)
         local generation = state.file_generation
-        http.request(core.endpoints.skip_segments, "POST", nil, json_string, function(data, error_msg)
+        -- The server reads userID from the query as well as the body; the
+        -- query keeps it in the owner-only secret file, off the command line
+        http.request(core.endpoints.skip_segments, "POST", { userID = identity.USER_ID }, json_string, function(data, error_msg)
             if data then
                 ui.toast(category.name .. " submitted successfully", "success")
                 mp.msg.info("✅ Segment submitted successfully")

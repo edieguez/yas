@@ -73,7 +73,7 @@ describe("user ID", function()
         end
         local stats = h:requests_to("GET", "/api/userStats")[1]
         expect.eq(stats.params.userID, F.USER_ID, "curl still sends it, read from the secret file")
-        expect.eq(h:requests_to("POST", "/api/skipSegments")[1].json.userID, F.USER_ID)
+        expect.eq(h:requests_to("POST", "/api/skipSegments")[1].params.userID, F.USER_ID)
     end)
 
     it("stores the ID for curl in an owner-only file", function()
@@ -85,13 +85,13 @@ describe("user ID", function()
         expect.matches(listing, "^%-rw%-%-%-%-%-%-%-")
     end)
 
-    it("deletes the temporary submission body once the request finishes", function()
+    it("sends a submission's userID from the secret file, not in the JSON body", function()
         local h = F.boot()
         F.mark(h, 10, 20)
         h:press("ENTER")
         local post = h:requests_to("POST", "/api/skipSegments")[1]
-        expect.count(post.files, 1)
-        expect.is_nil(io.open(post.files[1], "r"), "body file removed")
+        expect.eq(post.files, { h:state_file("yas_secret") })
+        expect.is_nil(post.json.userID)
     end)
 
     it("tightens permissions of an ID file written by an older version", function()
