@@ -130,7 +130,7 @@ describe("stats panel (z)", function()
         expect.eq(h:screen(), "")
     end)
 
-    known_bug("L1", "keeps the per-user cache across files", function()
+    it("keeps the per-user cache across files", function()
         local h = F.boot()
         h:press("z"); h:press("z")
         h:fire("end-file")

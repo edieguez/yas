@@ -1667,10 +1667,9 @@ do
         end)
     end
 
-    -- End of file: close the panel and drop the cache
+    -- End of file: close the panel. The cache is per user, not per video,
+    -- so it stays.
     function stats.reset()
-        cache.data = nil
-        cache.fetched_at = 0
         if visible then ui.hide_panel() end
         visible = false
     end
