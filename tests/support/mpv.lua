@@ -241,13 +241,7 @@ function M.new(opts)
     function mp.add_timeout(seconds, fn)
         local t = { seconds = seconds, fn = fn, killed = false }
         function t:kill() self.killed = true end
-        function t:resume() self.killed = false end
         table.insert(h.timers, t)
-        return t
-    end
-    function mp.add_periodic_timer(seconds, fn)
-        local t = mp.add_timeout(seconds, fn)
-        t.periodic = true
         return t
     end
 
@@ -303,12 +297,10 @@ function M.new(opts)
         end)
         return job
     end
-    function mp.abort_async_command() end
     function mp.commandv(...)
         table.insert(h.commands, { ... })
         return true
     end
-    function mp.command(s) table.insert(h.commands, { s }); return true end
 
     -- OSD ------------------------------------------------------------------
     function mp.create_osd_overlay(format)
@@ -324,11 +316,6 @@ function M.new(opts)
         table.insert(h.overlays, ov)
         return ov
     end
-    function mp.osd_message(text) table.insert(h.osd_history, text) end
-    function mp.get_osd_size() return 1280, 720 end
-    function mp.get_script_name() return "yas" end
-    function mp.get_script_directory() return nil end
-    function mp.get_time() return os.clock() end
 
     -- Modules required by the script ----------------------------------------
     h.utils = {
@@ -343,13 +330,6 @@ function M.new(opts)
             local dir, file = p:match("^(.*/)([^/]*)$")
             if not dir then return ".", p end
             return dir, file
-        end,
-        join_path = function(a, b) return a:gsub("/$", "") .. "/" .. b end,
-        file_info = function(p)
-            local f = io.open(p, "r")
-            if not f then return nil end
-            f:close()
-            return { is_file = true }
         end,
     }
     h.options = {
@@ -428,7 +408,6 @@ function M.new(opts)
         for k in pairs(globals) do rawset(_G, k, saved[k]) end
         if not ok then error(result, 0) end
 
-        self.yas = result
         self.env = result
         return result
     end
@@ -537,13 +516,6 @@ function M.new(opts)
         local s = f:read("*a")
         f:close()
         return s
-    end
-
-    function h:write_state_file(name, content)
-        os.execute("mkdir -p " .. shell_quote(self.home .. "/.local/state/mpv"))
-        local f = assert(io.open(self:state_file(name), "w"))
-        f:write(content)
-        f:close()
     end
 
     function h:cleanup()
